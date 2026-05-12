@@ -43,6 +43,28 @@ $ buf curl  --http2-prior-knowledge --protocol grpc \
 }
 ```
 
+## Litecoin mode
+
+This checkout includes an experimental Litecoin mode:
+
+```bash
+cargo run -- \
+  --mainchain litecoin \
+  --node-rpc-addr=localhost:19443 \
+  --node-rpc-user=user \
+  --node-rpc-pass=password
+```
+
+Litecoin mode is currently validator-only. It intentionally rejects:
+
+- `--enable-wallet`
+- `--enable-mempool`
+- `--node-blocks-dir`
+
+Those paths still depend on Bitcoin-specific wallet/address, P2P, block-file
+magic, and block decoding assumptions. Use Litecoin mode first against a
+patched Litecoin Core node with REST enabled and JSON-RPC available.
+
 # Interacting with the enforcer
 
 The CUSF enforcer exposes multiple gRPC services. These can be interacted with

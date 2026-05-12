@@ -14,6 +14,33 @@ use tracing_subscriber::fmt::format as tracing_format;
 const DEFAULT_NODE_RPC_ADDR: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 18443));
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum Mainchain {
+    #[default]
+    Bitcoin,
+    Litecoin,
+}
+
+impl Mainchain {
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Bitcoin => "Bitcoin Core",
+            Self::Litecoin => "Litecoin Core",
+        }
+    }
+
+    pub const fn data_dir_name(self) -> &'static str {
+        match self {
+            Self::Bitcoin => "bitcoin",
+            Self::Litecoin => "litecoin",
+        }
+    }
+
+    pub const fn is_litecoin(self) -> bool {
+        matches!(self, Self::Litecoin)
+    }
+}
+
 #[derive(Debug, Error)]
 enum HostAddrError {
     #[error("Failed to resolve address")]
@@ -389,6 +416,11 @@ fn get_long_version() -> clap::builder::Str {
 #[derive(Clone, Parser)]
 #[clap(version, long_version = get_long_version())]
 pub struct Config {
+    /// Mainchain node family to connect to. Litecoin mode is validator-only:
+    /// wallet, mempool, and block-file fast sync are intentionally disabled
+    /// until Litecoin address and block-file parameters are fully ported.
+    #[arg(long = "mainchain", default_value_t = Mainchain::default(), value_enum)]
+    pub mainchain: Mainchain,
     /// Directory to store wallet + drivechain + validator data.
     #[arg(default_value_os_t = get_data_dir().unwrap_or_else(|_| PathBuf::from("./datadir")), long)]
     pub data_dir: PathBuf,

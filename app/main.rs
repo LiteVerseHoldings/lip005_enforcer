@@ -50,12 +50,16 @@ mod logging;
 async fn get_block_template<RpcClient>(
     rpc_client: &RpcClient,
     network: bitcoin::Network,
+    mainchain: cli::Mainchain,
 ) -> Result<bitcoin_jsonrpsee::client::BlockTemplate, wallet::error::BitcoinCoreRPC>
 where
     RpcClient: MainClient + Sync,
 {
     let mut request = bitcoin_jsonrpsee::client::BlockTemplateRequest::default();
-    if network == bitcoin::Network::Signet {
+    if mainchain.is_litecoin() {
+        request.rules.push("mweb".to_owned());
+        request.rules.push("segwit".to_owned());
+    } else if network == bitcoin::Network::Signet {
         request.rules.push("signet".to_owned())
     }
     rpc_client
@@ -623,7 +627,9 @@ async fn spawn_task(
                     // https://github.com/bitcoin/bitcoin/blob/6c4fe401e908cff1b67d80035b117aae15fe7db6/src/rpc/protocol.h#L58
                     const RPC_CLIENT_NOT_CONNECTED: i32 = -9; // No P2P peers not connected, refuses block template requests
                     const RPC_IN_WARMUP: i32 = -10; // In IBD etc, refuses block template requests
-                    match get_block_template(&mainchain_client.clone(), network).await {
+                    match get_block_template(&mainchain_client.clone(), network, cli.mainchain)
+                        .await
+                    {
                         Ok(block_template) => break block_template,
                         Err(wallet::error::BitcoinCoreRPC {
                             method: _,
@@ -778,12 +784,55 @@ async fn main() -> Result<()> {
         cli.rolling_log_appender()?,
     )?;
     tracing::info!(
+        mainchain = %cli.mainchain.data_dir_name(),
         data_dir = %cli.data_dir.display(),
         log_dir = %cli.log_dir().display(),
         git_hash = cli.git_hash(),
         build = if cfg!(debug_assertions) { "debug" } else { "release" },
         "Starting up bip300301_enforcer",
     );
+
+    if cli.mainchain.is_litecoin() {
+        if cli.enable_wallet {
+            #[derive(Debug, Diagnostic, Error)]
+            #[error("Litecoin mode does not support the built-in wallet yet")]
+            #[diagnostic(
+                code(bip300301_enforcer::litecoin_wallet_not_supported),
+                help(
+                    "run without `--enable-wallet`; Litecoin address, BDK wallet, and signing support need a separate port"
+                )
+            )]
+            struct LitecoinWalletNotSupported;
+
+            return Err(LitecoinWalletNotSupported.into());
+        }
+
+        if cli.enable_mempool {
+            #[derive(Debug, Diagnostic, Error)]
+            #[error("Litecoin mode does not support the mempool/getblocktemplate server yet")]
+            #[diagnostic(
+                code(bip300301_enforcer::litecoin_mempool_not_supported),
+                help("run without `--enable-mempool` for the first Litecoin validator pass")
+            )]
+            struct LitecoinMempoolNotSupported;
+
+            return Err(LitecoinMempoolNotSupported.into());
+        }
+
+        if cli.node_blocks_dir_opts.dir.is_some() {
+            #[derive(Debug, Diagnostic, Error)]
+            #[error("Litecoin mode does not support block-file fast sync yet")]
+            #[diagnostic(
+                code(bip300301_enforcer::litecoin_block_files_not_supported),
+                help(
+                    "run without `--node-blocks-dir`; Litecoin block-file magic and MWEB-aware block decoding need a separate port"
+                )
+            )]
+            struct LitecoinBlockFilesNotSupported;
+
+            return Err(LitecoinBlockFilesNotSupported.into());
+        }
+    }
 
     let raw_url = format!("http://{}", cli.node_rpc_opts.addr);
     let mainchain_rest_client = MainRestClient::new(
@@ -881,33 +930,47 @@ async fn main() -> Result<()> {
         "Connected to mainchain client",
     );
 
-    // Verify we're talking to a supported Bitcoin Core version.
+    // Verify we're talking to a supported node version. Litecoin mode skips
+    // the Bitcoin Core allowlist by default, unless the caller explicitly
+    // asserts a major version.
+    let skip_version_check = cli.bitcoin_core_skip_version_check
+        || (cli.mainchain.is_litecoin() && cli.bitcoin_core_expected_version.is_none());
     let detected_version = version::check_bitcoin_core_version(
         &mainchain_client,
         cli.bitcoin_core_expected_version,
-        cli.bitcoin_core_skip_version_check,
+        skip_version_check,
     )
     .await?;
-    if cli.bitcoin_core_skip_version_check {
+    if skip_version_check {
         tracing::warn!(
+            node = cli.mainchain.display_name(),
             version = detected_version.version,
             subversion = %detected_version.subversion,
-            "Bitcoin Core version check skipped (--bitcoin-core-skip-version-check)"
+            "mainchain node version check skipped"
         );
     } else {
         tracing::info!(
+            node = cli.mainchain.display_name(),
             version = detected_version.version,
             subversion = %detected_version.subversion,
             major = detected_version.major,
-            "Bitcoin Core version accepted"
+            "mainchain node version accepted"
         );
     }
 
     // Both wallet data and validator data are stored under the same root
     // directory. Add a subdirectories to clearly indicate which
     // is which.
-    let validator_data_dir = cli.data_dir.join("validator").join(info.chain.to_string());
-    let wallet_data_dir = cli.data_dir.join("wallet").join(info.chain.to_string());
+    let validator_data_dir = cli
+        .data_dir
+        .join(cli.mainchain.data_dir_name())
+        .join("validator")
+        .join(info.chain.to_string());
+    let wallet_data_dir = cli
+        .data_dir
+        .join(cli.mainchain.data_dir_name())
+        .join("wallet")
+        .join(info.chain.to_string());
 
     // Ensure that the data directories exists
     for data_dir in [validator_data_dir.clone(), wallet_data_dir.clone()] {
@@ -923,8 +986,10 @@ async fn main() -> Result<()> {
     )
     .into_diagnostic()?;
 
-    let signet_challenge = if info.chain == bitcoin::Network::Signet {
-        let block_template = get_block_template(&mainchain_client, info.chain).await?;
+    let signet_challenge = if info.chain == bitcoin::Network::Signet && !cli.mainchain.is_litecoin()
+    {
+        let block_template =
+            get_block_template(&mainchain_client, info.chain, cli.mainchain).await?;
         let Some(signet_challenge) = block_template.signet_challenge else {
             return Err(miette!("signet challenge not found in block template"));
         };
