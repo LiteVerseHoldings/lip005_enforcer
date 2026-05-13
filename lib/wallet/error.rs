@@ -1399,6 +1399,8 @@ impl ToStatus for CreateBmmRequest {
 pub enum GetNewAddress {
     #[error(transparent)]
     BitcoinCoreRPC(#[from] BitcoinCoreRPC),
+    #[error("failed to decode Litecoin Core address scriptPubKey")]
+    Hex(#[from] hex::FromHexError),
     #[error(transparent)]
     NotUnlocked(#[from] NotUnlocked),
     #[error(transparent)]
@@ -1409,6 +1411,7 @@ impl ToStatus for GetNewAddress {
     fn builder(&self) -> StatusBuilder<'_> {
         match self {
             Self::BitcoinCoreRPC(err) => err.builder(),
+            Self::Hex(err) => StatusBuilder::new(err),
             Self::NotUnlocked(err) => err.builder(),
             Self::Persistence(err) => StatusBuilder::new(err),
         }

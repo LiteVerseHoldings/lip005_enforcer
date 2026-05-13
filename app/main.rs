@@ -342,7 +342,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 async fn start_gbt_server<RpcClient>(
-    mining_reward_address: bitcoin::Address,
+    mining_reward_spk: bitcoin::ScriptBuf,
     network: bitcoin::Network,
     network_info: bitcoin_jsonrpsee::client::NetworkInfo,
     cached_template_lifetime: Option<Duration>,
@@ -355,7 +355,7 @@ where
     RpcClient: bitcoin_jsonrpsee::MainClient + Send + Sync + 'static,
 {
     let gbt_server = cusf_enforcer_mempool::server::Server::new(
-        mining_reward_address.script_pubkey(),
+        mining_reward_spk,
         mempool,
         network,
         network_info,
@@ -573,10 +573,32 @@ async fn spawn_task(
             let (enforcer_task_err_tx, enforcer_task_err_rx) = oneshot::channel();
             let cancel = cancel.clone();
             let task_handle = tokio::task::spawn(async move {
-                // A pre-requisite for the mempool sync task is that the wallet is
-                // initialized and unlocked. Give a nice error message if this is not
-                // the case!
-                if !wallet.is_initialized().await {
+                let mining_reward_spk = match (
+                    cli.mining_opts.coinbase_script_pubkey.clone(),
+                    cli.mining_opts.coinbase_recipient.clone(),
+                ) {
+                    (Some(coinbase_script_pubkey), None) => Ok(coinbase_script_pubkey),
+                    (None, Some(mining_reward_address)) => {
+                        Ok(mining_reward_address.script_pubkey())
+                    }
+                    (None, None) => wallet.get_new_address_script_pubkey().await,
+                    (Some(_), Some(_)) => {
+                        unreachable!("clap conflicts_with prevents both coinbase outputs being set")
+                    }
+                };
+
+                let mining_reward_spk = match mining_reward_spk {
+                    Ok(mining_reward_spk) => mining_reward_spk,
+                    Err(err) => {
+                        let err = miette::Report::from_err(err);
+                        return Err(err.wrap_err("failed to get mining reward scriptPubKey"));
+                    }
+                };
+
+                // Bitcoin/BDK wallet mempool sync requires an initialized wallet.
+                // Litecoin can operate with a raw coinbase scriptPubKey even when
+                // the Litecoin Core node has no wallet RPC support.
+                if !cli.mainchain.is_litecoin() && !wallet.is_initialized().await {
                     #[derive(Debug, Diagnostic, Error)]
                     #[error(
                         "Wallet-based mempool sync requires an initialized wallet! Create one with the CreateWallet RPC method."
@@ -586,18 +608,6 @@ async fn spawn_task(
                     return Err(WalletNotInitialized.into());
                 }
 
-                let mining_reward_address = match cli.mining_opts.coinbase_recipient {
-                    Some(mining_reward_address) => Ok(mining_reward_address),
-                    None => wallet.get_new_address().await,
-                };
-
-                let mining_reward_address = match mining_reward_address {
-                    Ok(mining_reward_address) => mining_reward_address,
-                    Err(err) => {
-                        let err = miette::Report::from_err(err);
-                        return Err(err.wrap_err("failed to get mining reward address"));
-                    }
-                };
                 let network_info = match mainchain_client.get_network_info().await {
                     Ok(network_info) => network_info,
                     Err(err) => {
@@ -665,7 +675,7 @@ async fn spawn_task(
                     .gbt_cache_lifetime_s
                     .map(|secs| Duration::from_secs(secs.get()));
                 let server_handle = start_gbt_server(
-                    mining_reward_address,
+                    mining_reward_spk,
                     network,
                     network_info,
                     gbt_cache_lifetime,
@@ -793,18 +803,6 @@ async fn main() -> Result<()> {
     );
 
     if cli.mainchain.is_litecoin() {
-        if cli.enable_mempool {
-            #[derive(Debug, Diagnostic, Error)]
-            #[error("Litecoin mode does not support the mempool/getblocktemplate server yet")]
-            #[diagnostic(
-                code(bip300301_enforcer::litecoin_mempool_not_supported),
-                help("run without `--enable-mempool` for the first Litecoin validator pass")
-            )]
-            struct LitecoinMempoolNotSupported;
-
-            return Err(LitecoinMempoolNotSupported.into());
-        }
-
         if cli.node_blocks_dir_opts.dir.is_some() {
             #[derive(Debug, Diagnostic, Error)]
             #[error("Litecoin mode does not support block-file fast sync yet")]

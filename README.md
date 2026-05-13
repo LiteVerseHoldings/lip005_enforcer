@@ -57,19 +57,34 @@ cargo run -- \
 
 Litecoin mode currently supports validator sync plus an experimental Litecoin
 Core wallet RPC backend for wallet address, balance, deposit transaction, and
-BMM request transaction calls. It still intentionally rejects:
+BMM request transaction calls. It also supports Litecoin signet
+`getblocktemplate` startup when a coinbase output script is provided:
 
-- `--enable-mempool`
+```bash
+cargo run -- \
+  --mainchain litecoin \
+  --node-rpc-addr=localhost:39333 \
+  --node-rpc-user=user \
+  --node-rpc-pass=password \
+  --node-zmq-addr-sequence=tcp://127.0.0.1:39000 \
+  --enable-wallet \
+  --wallet-sync-source disabled \
+  --enable-mempool \
+  --signet-miner-coinbase-script-pubkey 00141111111111111111111111111111111111111111
+```
+
+It still intentionally rejects:
+
 - `--node-blocks-dir`
 
 Those remaining paths still depend on Bitcoin-specific P2P, block-file magic,
-getblocktemplate, and block decoding assumptions. Use Litecoin mode first
-against a patched Litecoin Core node with REST enabled and JSON-RPC available.
+and block decoding assumptions. Use Litecoin mode first against a patched
+Litecoin Core node with REST enabled and JSON-RPC available.
 
 The wallet backend delegates coin selection and signing to a loaded Litecoin
 Core wallet via JSON-RPC. Full Drivechain lifecycle testing is still blocked on
-the Litecoin mempool/getblocktemplate mining path and withdrawal bundle
-activation path.
+mining a controlled signet block from the template plus the proposal activation
+and withdrawal bundle paths.
 
 # Interacting with the enforcer
 

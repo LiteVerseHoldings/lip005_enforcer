@@ -87,14 +87,30 @@ cargo run -- `
   --node-zmq-addr-sequence tcp://127.0.0.1:39000
 ```
 
-Litecoin mode supports validator sync and an experimental `--enable-wallet`
-path backed by the loaded Litecoin Core wallet. Do not pass mempool or
-block-file options yet.
+Litecoin mode supports validator sync, an experimental `--enable-wallet` path
+backed by the loaded Litecoin Core wallet, and Litecoin signet
+`getblocktemplate` startup. If the Litecoin Core node does not expose wallet RPC
+methods, pass an explicit coinbase output script:
+
+```powershell
+cargo run -- `
+  --mainchain litecoin `
+  --data-dir .\litecoin-signet-enforcer-data `
+  --node-rpc-addr 127.0.0.1:39333 `
+  --node-rpc-user user `
+  --node-rpc-pass password `
+  --node-zmq-addr-sequence tcp://127.0.0.1:39000 `
+  --enable-wallet `
+  --wallet-sync-source disabled `
+  --enable-mempool `
+  --signet-miner-coinbase-script-pubkey 00141111111111111111111111111111111111111111
+```
 
 This means the current Litecoin path verifies block sync and validator state,
-and can delegate basic wallet funding/signing calls to Litecoin Core. The full
-Drivechain lifecycle is still blocked on the Litecoin mempool/getblocktemplate
-mining path and withdrawal bundle activation path.
+can delegate basic wallet funding/signing calls to Litecoin Core, and can serve
+a block template for the controlled signet. The full Drivechain lifecycle is
+still blocked on mining a controlled signet block from that template plus the
+proposal activation and withdrawal bundle paths.
 
 ## Mine A Test Block
 

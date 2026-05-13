@@ -274,6 +274,11 @@ fn parse_bitcoin_address(s: &str) -> Result<bitcoin::Address, String> {
     Ok(checked_addr)
 }
 
+fn parse_script_pubkey(s: &str) -> Result<bitcoin::ScriptBuf, String> {
+    let bytes = hex::decode(s).map_err(|err| format!("invalid scriptPubKey hex: {err}"))?;
+    Ok(bitcoin::ScriptBuf::from_bytes(bytes))
+}
+
 #[derive(Clone, Args)]
 pub struct MiningConfig {
     /// Path to the Python mining script from Bitcoin Core. If not set,
@@ -293,8 +298,20 @@ pub struct MiningConfig {
     #[arg(long = "signet-miner-bitcoin-cli-path", default_value = "bitcoin-cli")]
     pub bitcoin_cli_path: PathBuf,
     /// Address for block reward payment
-    #[arg(long = "signet-miner-coinbase-recipient", value_parser = parse_bitcoin_address)]
+    #[arg(
+        long = "signet-miner-coinbase-recipient",
+        value_parser = parse_bitcoin_address,
+        conflicts_with = "coinbase_script_pubkey"
+    )]
     pub coinbase_recipient: Option<bitcoin::Address>,
+    /// Raw scriptPubKey hex for block reward payment. Useful for Litecoin
+    /// addresses that the Bitcoin address parser cannot validate.
+    #[arg(
+        long = "signet-miner-coinbase-script-pubkey",
+        value_parser = parse_script_pubkey,
+        conflicts_with = "coinbase_recipient"
+    )]
+    pub coinbase_script_pubkey: Option<bitcoin::ScriptBuf>,
 }
 
 #[derive(Args, Clone)]

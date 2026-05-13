@@ -89,6 +89,12 @@ struct CoreWalletBalances {
 }
 
 #[derive(Debug, Deserialize)]
+struct CoreWalletAddressInfo {
+    #[serde(rename = "scriptPubKey")]
+    script_pub_key: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct CoreWalletMineBalances {
     trusted: serde_json::Number,
     untrusted_pending: serde_json::Number,
@@ -539,6 +545,24 @@ impl WalletInner {
                 method: "getnewaddress".to_string(),
                 error: err,
             })
+    }
+
+    async fn get_litecoin_core_address_script_pubkey(
+        &self,
+    ) -> Result<bitcoin::ScriptBuf, error::GetNewAddress> {
+        use jsonrpsee::core::client::ClientT as _;
+
+        let address = self.get_litecoin_core_address().await?;
+        let address_info: CoreWalletAddressInfo = self
+            .main_client
+            .request("getaddressinfo", jsonrpsee::rpc_params![address])
+            .await
+            .map_err(|err| error::BitcoinCoreRPC {
+                method: "getaddressinfo".to_string(),
+                error: err,
+            })?;
+        let script_pubkey = hex::decode(address_info.script_pub_key)?;
+        Ok(bitcoin::ScriptBuf::from_bytes(script_pubkey))
     }
 
     async fn fund_and_sign_litecoin_core_transaction(
@@ -2402,6 +2426,16 @@ impl Wallet {
         }
 
         Ok(self.get_new_address().await?.to_string())
+    }
+
+    pub async fn get_new_address_script_pubkey(
+        &self,
+    ) -> Result<bitcoin::ScriptBuf, error::GetNewAddress> {
+        if self.inner.is_litecoin_core_wallet() {
+            return self.inner.get_litecoin_core_address_script_pubkey().await;
+        }
+
+        Ok(self.get_new_address().await?.script_pubkey())
     }
 
     pub async fn put_withdrawal_bundle(
