@@ -108,9 +108,19 @@ cargo run -- `
 
 This means the current Litecoin path verifies block sync and validator state,
 can delegate basic wallet funding/signing calls to Litecoin Core, and can serve
-a block template for the controlled signet. The full Drivechain lifecycle is
-still blocked on mining a controlled signet block from that template plus the
-proposal activation and withdrawal bundle paths.
+a block template for the controlled signet. The controlled signet miner can use
+that enforcer template by pointing `LITECOIN_GBT_URL` at `127.0.0.1:8122`:
+
+```powershell
+$env:LITECOIN_GBT_URL = "http://127.0.0.1:8122/"
+$env:LITECOIN_SUBMIT_URL = "http://127.0.0.1:39332/"
+$env:LITECOIN_RPC_URL = "http://127.0.0.1:39332/"
+$env:LITECOIN_SIGNET_AUTHORITY_FILE = "C:\path\to\litecoin-signet-authority\authority.json"
+python ..\drivechain-evm\tools\mine-controlled-litecoin-signet.py 1
+```
+
+The full Drivechain lifecycle is still blocked on proposal activation and
+withdrawal bundle paths.
 
 ## Mine A Test Block
 
