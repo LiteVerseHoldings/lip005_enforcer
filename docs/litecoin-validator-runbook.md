@@ -59,6 +59,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\Check-LitecoinSi
 
 Expected result: chain is `signet`, RPC responds, and the best block is shown.
 
+## Start The Litecoin RPC Proxy
+
+Litecoin Core returns JSON-RPC success responses with `error: null` and uses a
+different REST header path shape than the enforcer client expects. Start the
+proxy from `drivechain-evm` before launching the enforcer:
+
+```powershell
+cd ..\drivechain-evm
+$env:LITECOIN_PROXY_PORT = "39333"
+$env:LITECOIN_RPC_PORT = "39332"
+node tools\litecoin-rpc-proxy.js
+cd ..\bip300301_enforcer
+```
+
 ## Run The Enforcer
 
 From `bip300301_enforcer`:
@@ -67,7 +81,7 @@ From `bip300301_enforcer`:
 cargo run -- `
   --mainchain litecoin `
   --data-dir .\litecoin-signet-enforcer-data `
-  --node-rpc-addr 127.0.0.1:39332 `
+  --node-rpc-addr 127.0.0.1:39333 `
   --node-rpc-user user `
   --node-rpc-pass password `
   --node-zmq-addr-sequence tcp://127.0.0.1:39000
@@ -81,8 +95,11 @@ options.
 From `drivechain-evm`:
 
 ```powershell
+$env:LITECOIN_SIGNET_AUTHORITY_FILE = "C:\path\to\litecoin-signet-authority\authority.json"
 python tools\mine-controlled-litecoin-signet.py 1
 ```
+
+The signet authority file is intentionally private and should not be committed.
 
 Then re-run:
 
