@@ -82,9 +82,9 @@ and block decoding assumptions. Use Litecoin mode first against a patched
 Litecoin Core node with REST enabled and JSON-RPC available.
 
 The wallet backend delegates coin selection and signing to a loaded Litecoin
-Core wallet via JSON-RPC. Full Drivechain lifecycle testing is still blocked on
-mining a controlled signet block from the template plus the proposal activation
-and withdrawal bundle paths.
+Core wallet via JSON-RPC. Controlled signet block mining from enforcer templates
+and sidechain proposal activation have been exercised. Full Drivechain
+lifecycle testing is still blocked on deposit and withdrawal bundle paths.
 
 # Interacting with the enforcer
 

@@ -119,8 +119,15 @@ $env:LITECOIN_SIGNET_AUTHORITY_FILE = "C:\path\to\litecoin-signet-authority\auth
 python ..\drivechain-evm\tools\mine-controlled-litecoin-signet.py 1
 ```
 
-The full Drivechain lifecycle is still blocked on proposal activation and
-withdrawal bundle paths.
+The drivechain lifecycle script can also create a sidechain proposal and mine
+through activation:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\drivechain-evm\scripts\Test-DrivechainLifecycle.ps1 -ActivateSidechainProposal
+```
+
+The full Drivechain lifecycle is still blocked on deposit and withdrawal bundle
+paths.
 
 ## Mine A Test Block
 

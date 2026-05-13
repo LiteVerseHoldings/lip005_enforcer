@@ -1,14 +1,19 @@
-use bitcoin::{BlockHash, Txid};
+use bitcoin::{
+    BlockHash, Txid,
+    hashes::{Hash as _, sha256d},
+};
 use futures::TryFutureExt as _;
 use jsonrpsee::{
     core::{RpcResult, async_trait},
     proc_macros::rpc,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    messages,
     server::custom_json_rpc_err,
-    types::{BmmCommitment, SidechainNumber},
+    types::{BmmCommitment, SidechainDeclaration, SidechainNumber, SidechainProposal},
     wallet::SidechainDepositTransaction,
 };
 
@@ -16,8 +21,42 @@ use crate::{
 #[error("BMM request with same sidechain number and previous block hash already exists")]
 struct BmmRequestAlreadyExistsError;
 
+#[derive(Debug, Deserialize)]
+pub struct CreateSidechainProposalParams {
+    pub sidechain_id: SidechainNumber,
+    pub title: String,
+    pub description: String,
+    pub hash_id_1: String,
+    pub hash_id_2: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CreateSidechainProposalResult {
+    pub sidechain_number: SidechainNumber,
+    pub description: String,
+    pub description_sha256d_hash: String,
+}
+
+#[derive(Debug, Error)]
+enum CreateSidechainProposalJsonError {
+    #[error("hash_id_1 must be 32 bytes of hex")]
+    HashId1,
+    #[error("hash_id_2 must be 20 bytes of hex")]
+    HashId2,
+    #[error(transparent)]
+    PushBytes(#[from] bitcoin::script::PushBytesError),
+    #[error(transparent)]
+    Persistence(#[from] rusqlite::Error),
+}
+
 #[rpc(namespace = "wallet", namespace_separator = ".", server)]
 pub trait Rpc {
+    #[method(name = "create_sidechain_proposal")]
+    async fn create_sidechain_proposal(
+        &self,
+        params: CreateSidechainProposalParams,
+    ) -> RpcResult<CreateSidechainProposalResult>;
+
     #[method(name = "list_sidechain_deposit_transactions")]
     async fn list_sidechain_deposit_transactions(
         &self,
@@ -36,6 +75,46 @@ pub trait Rpc {
 
 #[async_trait]
 impl RpcServer for crate::wallet::Wallet {
+    async fn create_sidechain_proposal(
+        &self,
+        params: CreateSidechainProposalParams,
+    ) -> RpcResult<CreateSidechainProposalResult> {
+        let hash_id_1 = hex::decode(params.hash_id_1)
+            .ok()
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .ok_or(CreateSidechainProposalJsonError::HashId1)
+            .map_err(custom_json_rpc_err)?;
+        let hash_id_2 = hex::decode(params.hash_id_2)
+            .ok()
+            .and_then(|bytes| <[u8; 20]>::try_from(bytes).ok())
+            .ok_or(CreateSidechainProposalJsonError::HashId2)
+            .map_err(custom_json_rpc_err)?;
+        let declaration = SidechainDeclaration {
+            title: params.title,
+            description: params.description,
+            hash_id_1,
+            hash_id_2,
+        };
+        let (_txout, description) =
+            messages::create_sidechain_proposal(params.sidechain_id, &declaration)
+                .map_err(CreateSidechainProposalJsonError::from)
+                .map_err(custom_json_rpc_err)?;
+        let proposal = SidechainProposal {
+            sidechain_number: params.sidechain_id,
+            description,
+        };
+        self.propose_sidechain(&proposal)
+            .await
+            .map_err(CreateSidechainProposalJsonError::from)
+            .map_err(custom_json_rpc_err)?;
+        let description_hash = proposal.description.sha256d_hash();
+        Ok(CreateSidechainProposalResult {
+            sidechain_number: proposal.sidechain_number,
+            description: hex::encode(&proposal.description.0),
+            description_sha256d_hash: hex::encode(sha256d::Hash::to_byte_array(description_hash)),
+        })
+    }
+
     async fn list_sidechain_deposit_transactions(
         &self,
     ) -> RpcResult<Vec<SidechainDepositTransaction>> {

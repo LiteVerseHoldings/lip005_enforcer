@@ -4,7 +4,7 @@ use serde::{Serialize, Serializer};
 
 use crate::{
     server::custom_json_rpc_err,
-    types::{Ctip, HeaderInfo, SidechainBlockInfo, SidechainNumber},
+    types::{Ctip, HeaderInfo, Sidechain, SidechainBlockInfo, SidechainNumber},
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -35,6 +35,12 @@ pub trait Rpc {
     #[method(name = "ctip")]
     fn get_ctip(&self, sidechain_number: SidechainNumber) -> RpcResult<Option<Ctip>>;
 
+    #[method(name = "get_sidechain_proposals")]
+    fn get_sidechain_proposals(&self) -> RpcResult<Vec<Sidechain>>;
+
+    #[method(name = "get_sidechains")]
+    fn get_sidechains(&self) -> RpcResult<Vec<Sidechain>>;
+
     #[method(name = "get_block_info")]
     fn get_block_info(
         &self,
@@ -52,6 +58,20 @@ impl RpcServer for crate::validator::Validator {
     fn get_ctip(&self, sidechain_number: SidechainNumber) -> RpcResult<Option<Ctip>> {
         self.try_get_ctip(sidechain_number)
             .map_err(custom_json_rpc_err)
+    }
+
+    fn get_sidechain_proposals(&self) -> RpcResult<Vec<Sidechain>> {
+        let sidechains = self
+            .get_sidechains()
+            .map_err(custom_json_rpc_err)?
+            .into_iter()
+            .map(|(_proposal_id, sidechain)| sidechain)
+            .collect();
+        Ok(sidechains)
+    }
+
+    fn get_sidechains(&self) -> RpcResult<Vec<Sidechain>> {
+        self.get_active_sidechains().map_err(custom_json_rpc_err)
     }
 
     fn get_block_info(
