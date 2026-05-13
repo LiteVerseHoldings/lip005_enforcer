@@ -65,6 +65,12 @@ Those paths still depend on Bitcoin-specific wallet/address, P2P, block-file
 magic, and block decoding assumptions. Use Litecoin mode first against a
 patched Litecoin Core node with REST enabled and JSON-RPC available.
 
+Because wallet and mempool are disabled, Litecoin mode does not yet support the
+full Drivechain lifecycle: sidechain proposal transaction creation, deposits,
+BMM request transaction creation, or withdrawal bundles. The validator can sync
+and index Litecoin signet blocks; lifecycle transaction support needs a separate
+Litecoin wallet/mempool port.
+
 # Interacting with the enforcer
 
 The CUSF enforcer exposes multiple gRPC services. These can be interacted with

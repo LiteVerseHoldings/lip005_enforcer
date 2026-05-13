@@ -90,6 +90,11 @@ cargo run -- `
 Litecoin mode is validator-only. Do not pass wallet, mempool, or block-file
 options.
 
+This means the current Litecoin path verifies block sync and validator state,
+but not the full Drivechain lifecycle. Sidechain proposal transactions,
+deposits, BMM request transactions, and withdrawal bundles still require a
+Litecoin wallet/mempool port.
+
 ## Mine A Test Block
 
 From `drivechain-evm`:
