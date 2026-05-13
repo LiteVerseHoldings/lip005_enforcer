@@ -3,3 +3,8 @@ bip300301_enforcer.mdb
 datadir
 sync_analysis
 integrationtests.env
+litecoin-controlled-signet-enforcer-data/
+litecoin-data/
+litecoin-signet-enforcer-data/
+logs/
+target-signet/
