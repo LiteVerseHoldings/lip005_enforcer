@@ -1,5 +1,5 @@
 use bitcoin::{
-    BlockHash, Txid,
+    Amount, BlockHash, Txid,
     hashes::{Hash as _, sha256d},
 };
 use futures::TryFutureExt as _;
@@ -37,6 +37,19 @@ pub struct CreateSidechainProposalResult {
     pub description_sha256d_hash: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CreateDepositTransactionParams {
+    pub sidechain_id: SidechainNumber,
+    pub address: String,
+    pub value_sats: u64,
+    pub fee_sats: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CreateDepositTransactionResult {
+    pub txid: Txid,
+}
+
 #[derive(Debug, Error)]
 enum CreateSidechainProposalJsonError {
     #[error("hash_id_1 must be 32 bytes of hex")]
@@ -49,6 +62,20 @@ enum CreateSidechainProposalJsonError {
     Persistence(#[from] rusqlite::Error),
 }
 
+#[derive(Debug, Error)]
+enum CreateDepositTransactionJsonError {
+    #[error("sidechain {0} is not active")]
+    SidechainNotActive(SidechainNumber),
+    #[error("address must be non-empty")]
+    EmptyAddress,
+    #[error("value_sats must be greater than zero")]
+    ZeroValue,
+    #[error(transparent)]
+    CreateDeposit(#[from] crate::wallet::error::CreateDeposit),
+    #[error(transparent)]
+    GetSidechains(#[from] crate::validator::GetSidechainsError),
+}
+
 #[rpc(namespace = "wallet", namespace_separator = ".", server)]
 pub trait Rpc {
     #[method(name = "create_sidechain_proposal")]
@@ -56,6 +83,12 @@ pub trait Rpc {
         &self,
         params: CreateSidechainProposalParams,
     ) -> RpcResult<CreateSidechainProposalResult>;
+
+    #[method(name = "create_deposit_transaction")]
+    async fn create_deposit_transaction(
+        &self,
+        params: CreateDepositTransactionParams,
+    ) -> RpcResult<CreateDepositTransactionResult>;
 
     #[method(name = "list_sidechain_deposit_transactions")]
     async fn list_sidechain_deposit_transactions(
@@ -121,6 +154,43 @@ impl RpcServer for crate::wallet::Wallet {
         self.list_sidechain_deposit_transactions()
             .map_err(custom_json_rpc_err)
             .await
+    }
+
+    async fn create_deposit_transaction(
+        &self,
+        params: CreateDepositTransactionParams,
+    ) -> RpcResult<CreateDepositTransactionResult> {
+        if params.address.is_empty() {
+            return Err(custom_json_rpc_err(
+                CreateDepositTransactionJsonError::EmptyAddress,
+            ));
+        }
+
+        let value = Amount::from_sat(params.value_sats);
+        if value == Amount::ZERO {
+            return Err(custom_json_rpc_err(
+                CreateDepositTransactionJsonError::ZeroValue,
+            ));
+        }
+
+        if !self
+            .is_sidechain_active(params.sidechain_id)
+            .map_err(CreateDepositTransactionJsonError::from)
+            .map_err(custom_json_rpc_err)?
+        {
+            return Err(custom_json_rpc_err(
+                CreateDepositTransactionJsonError::SidechainNotActive(params.sidechain_id),
+            ));
+        }
+
+        let fee = params.fee_sats.map(Amount::from_sat);
+        let txid = self
+            .create_deposit(params.sidechain_id, params.address, value, fee)
+            .await
+            .map_err(CreateDepositTransactionJsonError::from)
+            .map_err(custom_json_rpc_err)?;
+
+        Ok(CreateDepositTransactionResult { txid })
     }
 
     async fn create_bmm_critical_data_transaction(

@@ -84,7 +84,8 @@ Litecoin Core node with REST enabled and JSON-RPC available.
 The wallet backend delegates coin selection and signing to a loaded Litecoin
 Core wallet via JSON-RPC. Controlled signet block mining from enforcer templates
 and sidechain proposal activation have been exercised. Full Drivechain
-lifecycle testing is still blocked on deposit and withdrawal bundle paths.
+lifecycle testing is still blocked on a funded wallet-enabled Litecoin Core
+node for deposit funding/signing, plus withdrawal bundle paths.
 
 # Interacting with the enforcer
 

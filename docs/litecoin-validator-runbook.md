@@ -126,6 +126,11 @@ through activation:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\drivechain-evm\scripts\Test-DrivechainLifecycle.ps1 -ActivateSidechainProposal
 ```
 
+To attempt deposit transaction creation after activation, add
+`-AttemptDepositTransaction`. On the current local signet node this reaches the
+Litecoin Core wallet backend and stops at `fundrawtransaction` with HTTP 404
+because wallet RPC support is not available in that node.
+
 The full Drivechain lifecycle is still blocked on deposit and withdrawal bundle
 paths.
 
