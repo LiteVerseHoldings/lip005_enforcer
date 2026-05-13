@@ -1344,8 +1344,6 @@ impl ToStatus for BuildBmmTx {
 pub(in crate::wallet) enum CreateBmmRequestInner {
     #[error("failed to build BMM tx")]
     BuildBmmTx(#[from] BuildBmmTx),
-    #[error("failed to broadcast tx")]
-    BroadcastTx(#[source] jsonrpsee::core::ClientError),
     #[error("failed to broadcast nonstandard tx")]
     BroadcastNonstandardTx(#[source] bitcoin_send_tx_p2p::Error),
     #[error("broadcast deposit transaction failed: {txid}")]
@@ -1367,8 +1365,7 @@ impl ToStatus for CreateBmmRequestInner {
             Self::GetHeaderInfo(err) => err.builder(),
             Self::LitecoinCoreWalletTx(err) => err.builder(),
             Self::SignTx(err) => StatusBuilder::with_code(self, err.builder()),
-            Self::BroadcastTx(_)
-            | Self::BroadcastNonstandardTx(_)
+            Self::BroadcastNonstandardTx(_)
             | Self::BroadcastUnsuccessful { .. }
             | Self::Rusqlite(_) => StatusBuilder::new(self),
         }

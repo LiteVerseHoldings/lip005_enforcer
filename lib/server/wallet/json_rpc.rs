@@ -1,6 +1,11 @@
+use std::borrow::Cow;
+
 use bitcoin::{
-    Amount, BlockHash, Txid,
+    Amount, BlockHash, Transaction, Txid, absolute,
+    consensus::Decodable as _,
+    consensus::encode::VarInt,
     hashes::{Hash as _, sha256d},
+    transaction,
 };
 use futures::TryFutureExt as _;
 use jsonrpsee::{
@@ -20,6 +25,41 @@ use crate::{
 #[derive(Debug, Error)]
 #[error("BMM request with same sidechain number and previous block hash already exists")]
 struct BmmRequestAlreadyExistsError;
+
+fn deserialize_transaction_or_legacy_zero_input(
+    transaction_bytes: &[u8],
+) -> Result<Transaction, bitcoin::consensus::encode::Error> {
+    match bitcoin::consensus::deserialize(transaction_bytes) {
+        Ok(transaction) => Ok(transaction),
+        Err(original_err) => {
+            let mut cursor = transaction_bytes;
+            let Ok(version) = transaction::Version::consensus_decode(&mut cursor) else {
+                return Err(original_err);
+            };
+            let Ok(input_count) = VarInt::consensus_decode(&mut cursor) else {
+                return Err(original_err);
+            };
+            if input_count.0 != 0 {
+                return Err(original_err);
+            }
+            let Ok(output) = Vec::<bitcoin::TxOut>::consensus_decode(&mut cursor) else {
+                return Err(original_err);
+            };
+            let Ok(lock_time) = absolute::LockTime::consensus_decode(&mut cursor) else {
+                return Err(original_err);
+            };
+            if !cursor.is_empty() {
+                return Err(original_err);
+            }
+            Ok(Transaction {
+                version,
+                lock_time,
+                input: Vec::new(),
+                output,
+            })
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CreateSidechainProposalParams {
@@ -50,6 +90,17 @@ pub struct CreateDepositTransactionResult {
     pub txid: Txid,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BroadcastWithdrawalBundleParams {
+    pub sidechain_id: SidechainNumber,
+    pub transaction: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BroadcastWithdrawalBundleResult {
+    pub m6id: Txid,
+}
+
 #[derive(Debug, Error)]
 enum CreateSidechainProposalJsonError {
     #[error("hash_id_1 must be 32 bytes of hex")]
@@ -76,6 +127,18 @@ enum CreateDepositTransactionJsonError {
     GetSidechains(#[from] crate::validator::GetSidechainsError),
 }
 
+#[derive(Debug, Error)]
+enum BroadcastWithdrawalBundleJsonError {
+    #[error("transaction must be hex")]
+    TransactionHex(#[source] hex::FromHexError),
+    #[error("transaction consensus decode failed")]
+    TransactionDecode(#[source] bitcoin::consensus::encode::Error),
+    #[error(transparent)]
+    BlindedM6(#[from] crate::types::BlindedM6Error),
+    #[error(transparent)]
+    Persistence(#[from] rusqlite::Error),
+}
+
 #[rpc(namespace = "wallet", namespace_separator = ".", server)]
 pub trait Rpc {
     #[method(name = "create_sidechain_proposal")]
@@ -94,6 +157,12 @@ pub trait Rpc {
     async fn list_sidechain_deposit_transactions(
         &self,
     ) -> RpcResult<Vec<SidechainDepositTransaction>>;
+
+    #[method(name = "broadcast_withdrawal_bundle")]
+    async fn broadcast_withdrawal_bundle(
+        &self,
+        params: BroadcastWithdrawalBundleParams,
+    ) -> RpcResult<BroadcastWithdrawalBundleResult>;
 
     #[method(name = "create_bmm_critical_data_transaction")]
     async fn create_bmm_critical_data_transaction(
@@ -154,6 +223,30 @@ impl RpcServer for crate::wallet::Wallet {
         self.list_sidechain_deposit_transactions()
             .map_err(custom_json_rpc_err)
             .await
+    }
+
+    async fn broadcast_withdrawal_bundle(
+        &self,
+        params: BroadcastWithdrawalBundleParams,
+    ) -> RpcResult<BroadcastWithdrawalBundleResult> {
+        let transaction_bytes = hex::decode(params.transaction)
+            .map_err(BroadcastWithdrawalBundleJsonError::TransactionHex)
+            .map_err(custom_json_rpc_err)?;
+        let transaction: Transaction =
+            deserialize_transaction_or_legacy_zero_input(&transaction_bytes)
+                .map_err(BroadcastWithdrawalBundleJsonError::TransactionDecode)
+                .map_err(custom_json_rpc_err)?;
+        let blinded_m6 = crate::types::BlindedM6::try_from(Cow::Owned(transaction))
+            .map_err(BroadcastWithdrawalBundleJsonError::from)
+            .map_err(custom_json_rpc_err)?
+            .into_owned();
+        let m6id = self
+            .put_withdrawal_bundle(params.sidechain_id, &blinded_m6)
+            .await
+            .map_err(BroadcastWithdrawalBundleJsonError::from)
+            .map_err(custom_json_rpc_err)?;
+
+        Ok(BroadcastWithdrawalBundleResult { m6id: m6id.0 })
     }
 
     async fn create_deposit_transaction(

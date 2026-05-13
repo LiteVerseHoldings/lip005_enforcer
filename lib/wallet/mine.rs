@@ -204,7 +204,8 @@ impl Wallet {
         }
         // Ack bundles
         // TODO: Exclusively ack bundles that are known to the wallet
-        // TODO: ack bundles when M2 messages are present
+        // M2 ACKs can activate a sidechain in the same block, which changes
+        // the expected M4 vote vector length during validation.
         if ack_all_proposals && coinbase_builder.messages().m2_ack_slots().is_empty() {
             let active_sidechains = self.inner.validator.get_active_sidechains()?;
             let upvotes = active_sidechains

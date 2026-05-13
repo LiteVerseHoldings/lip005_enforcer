@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::Path,
     str::FromStr,
     sync::Arc,
@@ -624,19 +624,31 @@ impl WalletInner {
     async fn fund_and_sign_litecoin_core_transaction(
         &self,
         tx: Transaction,
+        change_position: Option<usize>,
     ) -> Result<Transaction, error::LitecoinCoreWalletTx> {
         use jsonrpsee::core::client::ClientT as _;
 
         let tx_hex = serialize_litecoin_core_funding_tx_hex(&tx);
         tracing::debug!(%tx_hex, "Funding Litecoin Core wallet transaction");
-        let funded: FundRawTransactionResponse = self
-            .main_client
-            .request("fundrawtransaction", jsonrpsee::rpc_params![tx_hex])
-            .await
-            .map_err(|err| error::BitcoinCoreRPC {
-                method: "fundrawtransaction".to_string(),
-                error: err,
-            })?;
+        let funded: FundRawTransactionResponse = if let Some(change_position) = change_position {
+            self.main_client
+                .request(
+                    "fundrawtransaction",
+                    jsonrpsee::rpc_params![
+                        tx_hex,
+                        serde_json::json!({ "changePosition": change_position })
+                    ],
+                )
+                .await
+        } else {
+            self.main_client
+                .request("fundrawtransaction", jsonrpsee::rpc_params![tx_hex])
+                .await
+        }
+        .map_err(|err| error::BitcoinCoreRPC {
+            method: "fundrawtransaction".to_string(),
+            error: err,
+        })?;
 
         let signed: SignRawTransactionWithWalletResponse = self
             .main_client
@@ -1168,11 +1180,21 @@ impl Wallet {
         &self,
     ) -> Result<HashMap<SidechainNumber, SidechainProposal>, crate::validator::GetSidechainsError>
     {
+        let active_sidechain_numbers: HashSet<_> = self
+            .inner
+            .validator
+            .get_active_sidechains()?
+            .into_iter()
+            .map(|sidechain| sidechain.proposal.sidechain_number)
+            .collect();
         let pending_proposals = self
             .inner
             .validator
             .get_sidechains()?
             .into_iter()
+            .filter(|(_, sidechain)| {
+                !active_sidechain_numbers.contains(&sidechain.proposal.sidechain_number)
+            })
             .map(|(_, sidechain)| (sidechain.proposal.sidechain_number, sidechain.proposal))
             .collect();
         Ok(pending_proposals)
@@ -1575,9 +1597,10 @@ impl Wallet {
             input,
             output: vec![deposit_txout, address_txout],
         };
+        let change_position = Some(tx.output.len());
         let tx = self
             .inner
-            .fund_and_sign_litecoin_core_transaction(tx)
+            .fund_and_sign_litecoin_core_transaction(tx, change_position)
             .await?;
         let txid = tx.compute_txid();
 
@@ -2344,7 +2367,7 @@ impl Wallet {
         };
         let tx = self
             .inner
-            .fund_and_sign_litecoin_core_transaction(tx)
+            .fund_and_sign_litecoin_core_transaction(tx, None)
             .await?;
         let txid = tx.compute_txid();
         let stored = self
@@ -2355,11 +2378,12 @@ impl Wallet {
             )
             .await?;
 
-        if crate::rpc_client::broadcast_transaction(&self.inner.main_client, &tx)
+        let broadcast_txid = self
+            .inner
+            .broadcast_litecoin_core_transaction(&tx)
             .await
-            .map_err(error::CreateBmmRequestInner::BroadcastTx)?
-            .is_none()
-        {
+            .map_err(error::LitecoinCoreWalletTx::from)?;
+        if broadcast_txid != txid {
             return Err(error::CreateBmmRequestInner::BroadcastUnsuccessful { txid }.into());
         }
 

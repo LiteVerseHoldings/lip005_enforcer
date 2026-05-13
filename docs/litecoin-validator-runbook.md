@@ -108,8 +108,9 @@ cargo run -- `
 
 This means the current Litecoin path verifies block sync and validator state,
 can delegate wallet funding/signing calls to Litecoin Core, can broadcast and
-include deposit transactions, and can serve a block template for the controlled
-signet. The controlled signet miner can use that enforcer template by pointing
+include deposit transactions, can propose/vote/include withdrawal bundles, and
+can serve a block template for the controlled signet. The controlled signet
+miner can use that enforcer template by pointing
 `LITECOIN_GBT_URL` at `127.0.0.1:8122`:
 
 ```powershell
@@ -128,12 +129,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\drivechain-evm\script
 ```
 
 To create, broadcast, mine, and verify a deposit CTIP after activation, add
-`-AttemptDepositTransaction`. This requires a funded loaded Litecoin Core
-wallet and the wallet-enabled Litecoin Core build used by
-`Start-LitecoinSignet.ps1`.
+`-AttemptDepositTransaction`. To additionally propose a blinded withdrawal
+bundle, mine the M3 proposal, mine M4 votes, and verify M6 inclusion, add
+`-AttemptWithdrawalBundle`.
 
-The full Drivechain lifecycle is still blocked on withdrawal bundle paths and
-longer-running operational hardening.
+These checks require a funded loaded Litecoin Core wallet and the
+wallet-enabled Litecoin Core build used by `Start-LitecoinSignet.ps1`. Full
+mainnet readiness still requires EVM bridge integration and longer-running
+operational hardening.
 
 ## Mine A Test Block
 

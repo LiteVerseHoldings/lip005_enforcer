@@ -82,11 +82,12 @@ and block decoding assumptions. Use Litecoin mode first against a patched
 Litecoin Core node with REST enabled and JSON-RPC available.
 
 The wallet backend delegates coin selection and signing to a loaded Litecoin
-Core wallet via JSON-RPC. Controlled signet block mining from enforcer templates
-sidechain proposal activation, deposit broadcast, and deposit inclusion have
-been exercised against a funded wallet-enabled Litecoin Core signet node. Full
-Drivechain lifecycle readiness still requires withdrawal bundle integration and
-longer-running operational hardening.
+Core wallet via JSON-RPC. Controlled signet block mining from enforcer
+templates, sidechain proposal activation, deposit broadcast, deposit inclusion,
+withdrawal bundle proposal, M4 voting, and M6 inclusion have been exercised
+against a funded wallet-enabled Litecoin Core signet node. Full Drivechain
+lifecycle readiness still requires EVM bridge integration and longer-running
+operational hardening.
 
 # Interacting with the enforcer
 
