@@ -107,9 +107,10 @@ cargo run -- `
 ```
 
 This means the current Litecoin path verifies block sync and validator state,
-can delegate basic wallet funding/signing calls to Litecoin Core, and can serve
-a block template for the controlled signet. The controlled signet miner can use
-that enforcer template by pointing `LITECOIN_GBT_URL` at `127.0.0.1:8122`:
+can delegate wallet funding/signing calls to Litecoin Core, can broadcast and
+include deposit transactions, and can serve a block template for the controlled
+signet. The controlled signet miner can use that enforcer template by pointing
+`LITECOIN_GBT_URL` at `127.0.0.1:8122`:
 
 ```powershell
 $env:LITECOIN_GBT_URL = "http://127.0.0.1:8122/"
@@ -126,13 +127,13 @@ through activation:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\drivechain-evm\scripts\Test-DrivechainLifecycle.ps1 -ActivateSidechainProposal
 ```
 
-To attempt deposit transaction creation after activation, add
-`-AttemptDepositTransaction`. On the current local signet node this reaches the
-Litecoin Core wallet backend and stops at `fundrawtransaction` with HTTP 404
-because wallet RPC support is not available in that node.
+To create, broadcast, mine, and verify a deposit CTIP after activation, add
+`-AttemptDepositTransaction`. This requires a funded loaded Litecoin Core
+wallet and the wallet-enabled Litecoin Core build used by
+`Start-LitecoinSignet.ps1`.
 
-The full Drivechain lifecycle is still blocked on deposit and withdrawal bundle
-paths.
+The full Drivechain lifecycle is still blocked on withdrawal bundle paths and
+longer-running operational hardening.
 
 ## Mine A Test Block
 

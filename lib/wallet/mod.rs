@@ -22,6 +22,7 @@ use bdk_wallet::{
 use bitcoin::{
     Amount, BlockHash, Network, Transaction, Txid,
     amount::Denomination,
+    consensus::encode::Encodable as _,
     hashes::{Hash as _, HashEngine, sha256, sha256d},
     script::PushBytesBuf,
 };
@@ -99,6 +100,61 @@ struct CoreWalletMineBalances {
     trusted: serde_json::Number,
     untrusted_pending: serde_json::Number,
     immature: serde_json::Number,
+}
+
+fn serialize_litecoin_core_funding_tx_hex(tx: &Transaction) -> String {
+    if !tx.input.is_empty() {
+        return bitcoin::consensus::encode::serialize_hex(tx);
+    }
+
+    // bitcoin 0.32 serializes zero-input transactions with the segwit marker to
+    // avoid ambiguity. Litecoin Core 0.21 rejects that encoding in
+    // fundrawtransaction, so use legacy encoding for the unsigned funding
+    // template and let Core add the spendable wallet input.
+    let mut bytes = Vec::new();
+    tx.version
+        .consensus_encode(&mut bytes)
+        .expect("writing to Vec cannot fail");
+    tx.input
+        .consensus_encode(&mut bytes)
+        .expect("writing to Vec cannot fail");
+    tx.output
+        .consensus_encode(&mut bytes)
+        .expect("writing to Vec cannot fail");
+    tx.lock_time
+        .consensus_encode(&mut bytes)
+        .expect("writing to Vec cannot fail");
+    hex::encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::{ScriptBuf, TxOut, absolute, transaction};
+
+    #[test]
+    fn litecoin_core_funding_serializes_zero_input_tx_without_segwit_marker() {
+        let tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(10_000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0xb4, 0x01, 0x40, 0x51]),
+                },
+                TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x6a, 0x01, 0x00]),
+                },
+            ],
+        };
+
+        let tx_hex = serialize_litecoin_core_funding_tx_hex(&tx);
+
+        assert!(tx_hex.starts_with("020000000002"));
+        assert!(!tx_hex.starts_with("02000000000100"));
+    }
 }
 
 #[non_exhaustive]
@@ -571,7 +627,8 @@ impl WalletInner {
     ) -> Result<Transaction, error::LitecoinCoreWalletTx> {
         use jsonrpsee::core::client::ClientT as _;
 
-        let tx_hex = bitcoin::consensus::encode::serialize_hex(&tx);
+        let tx_hex = serialize_litecoin_core_funding_tx_hex(&tx);
+        tracing::debug!(%tx_hex, "Funding Litecoin Core wallet transaction");
         let funded: FundRawTransactionResponse = self
             .main_client
             .request("fundrawtransaction", jsonrpsee::rpc_params![tx_hex])
@@ -599,6 +656,22 @@ impl WalletInner {
 
         let tx = bitcoin::consensus::encode::deserialize_hex::<Transaction>(&signed.hex)?;
         Ok(tx)
+    }
+
+    async fn broadcast_litecoin_core_transaction(
+        &self,
+        tx: &Transaction,
+    ) -> Result<bitcoin::Txid, error::BitcoinCoreRPC> {
+        use jsonrpsee::core::client::ClientT as _;
+
+        let tx_hex = bitcoin::consensus::encode::serialize_hex(tx);
+        self.main_client
+            .request("sendrawtransaction", jsonrpsee::rpc_params![tx_hex])
+            .await
+            .map_err(|err| error::BitcoinCoreRPC {
+                method: "sendrawtransaction".to_string(),
+                error: err,
+            })
     }
 
     fn read_db_mnemonic(
@@ -1509,11 +1582,12 @@ impl Wallet {
         let txid = tx.compute_txid();
 
         tracing::debug!(%txid, "Attempting to broadcast Litecoin Core deposit transaction via RPC...");
-        let broadcast_successfully =
-            crate::rpc_client::broadcast_transaction(&self.inner.main_client, &tx)
-                .await
-                .map_err(error::CreateDeposit::BroadcastTx)?
-                .is_some();
+        let broadcast_txid = self
+            .inner
+            .broadcast_litecoin_core_transaction(&tx)
+            .await
+            .map_err(error::LitecoinCoreWalletTx::from)?;
+        let broadcast_successfully = broadcast_txid == txid;
 
         if broadcast_successfully {
             tracing::info!(%txid, "Broadcast Litecoin Core deposit transaction successfully");
