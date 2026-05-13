@@ -47,7 +47,7 @@ use crate::{
     messages::{self, M8BmmRequest},
     types::{
         BDKWalletTransaction, BlindedM6, BmmCommitment, Ctip, M6id, PendingM6idInfo, SidechainAck,
-        SidechainNumber, SidechainProposal, SidechainProposalId,
+        SidechainNumber, SidechainProposal, SidechainProposalId, op_drivechain_script,
     },
     validator::{self, Validator},
     wallet::{
@@ -82,6 +82,13 @@ struct FundRawTransactionResponse {
 struct SignRawTransactionWithWalletResponse {
     hex: String,
     complete: bool,
+    #[serde(default)]
+    errors: Vec<CoreWalletSignError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreWalletSignError {
+    error: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +100,17 @@ struct CoreWalletBalances {
 struct CoreWalletAddressInfo {
     #[serde(rename = "scriptPubKey")]
     script_pub_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreWalletUnspent {
+    txid: bitcoin::Txid,
+    vout: u32,
+    amount: serde_json::Number,
+    #[serde(rename = "scriptPubKey")]
+    script_pub_key: String,
+    spendable: bool,
+    safe: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,6 +143,24 @@ fn serialize_litecoin_core_funding_tx_hex(tx: &Transaction) -> String {
         .consensus_encode(&mut bytes)
         .expect("writing to Vec cannot fail");
     hex::encode(bytes)
+}
+
+fn amount_to_core_rpc_btc(amount: Amount) -> f64 {
+    amount.to_sat() as f64 / 100_000_000.0
+}
+
+fn is_op_drivechain_not_supported_message(msg: &str) -> bool {
+    msg.contains("non-mandatory-script-verify-flag (NOPx reserved for soft-fork upgrades)")
+        || msg.contains("mempool-script-verify-flag-failed (NOPx reserved for soft-fork upgrades)")
+        || msg.contains("NOPx reserved for soft-fork upgrades")
+}
+
+fn is_op_drivechain_not_supported_rpc_error(err: &error::BitcoinCoreRPC) -> bool {
+    matches!(
+        &err.error,
+        jsonrpsee::core::client::Error::Call(call)
+            if is_op_drivechain_not_supported_message(call.message())
+    )
 }
 
 #[cfg(test)]
@@ -663,6 +699,130 @@ impl WalletInner {
             })?;
 
         if !signed.complete {
+            return Err(error::LitecoinCoreWalletTx::SignIncomplete);
+        }
+
+        let tx = bitcoin::consensus::encode::deserialize_hex::<Transaction>(&signed.hex)?;
+        Ok(tx)
+    }
+
+    async fn manually_fund_and_sign_litecoin_core_transaction(
+        &self,
+        mut tx: Transaction,
+        external_input_value: Amount,
+        external_input_script_pubkey: bitcoin::ScriptBuf,
+        fee: Amount,
+        change_position: Option<usize>,
+    ) -> Result<Transaction, error::LitecoinCoreWalletTx> {
+        use jsonrpsee::core::client::ClientT as _;
+
+        let output_value = tx.output.iter().map(|output| output.value).sum::<Amount>();
+        let required_wallet_value = output_value
+            .checked_add(fee)
+            .and_then(|value| value.checked_sub(external_input_value))
+            .unwrap_or(Amount::ZERO);
+
+        let unspent: Vec<CoreWalletUnspent> = self
+            .main_client
+            .request("listunspent", jsonrpsee::rpc_params![0, 9_999_999])
+            .await
+            .map_err(|err| error::BitcoinCoreRPC {
+                method: "listunspent".to_string(),
+                error: err,
+            })?;
+
+        let mut selected_value = Amount::ZERO;
+        let mut selected = Vec::new();
+        for utxo in unspent
+            .into_iter()
+            .filter(|utxo| utxo.spendable && utxo.safe)
+        {
+            let value = Self::core_amount(&utxo.amount).map_err(|err| error::BitcoinCoreRPC {
+                method: "listunspent".to_string(),
+                error: jsonrpsee::core::client::Error::Custom(err.to_string()),
+            })?;
+            selected_value = selected_value
+                .checked_add(value)
+                .ok_or(error::LitecoinCoreWalletTx::InsufficientFunds {
+                    required: required_wallet_value,
+                    available: selected_value,
+                })?;
+            selected.push((utxo, value));
+            if selected_value >= required_wallet_value {
+                break;
+            }
+        }
+
+        if selected_value < required_wallet_value {
+            return Err(error::LitecoinCoreWalletTx::InsufficientFunds {
+                required: required_wallet_value,
+                available: selected_value,
+            });
+        }
+
+        for (utxo, _) in &selected {
+            tx.input.push(bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: utxo.txid,
+                    vout: utxo.vout,
+                },
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::default(),
+            });
+        }
+
+        let change_value = selected_value
+            .checked_sub(required_wallet_value)
+            .expect("selected value was checked above");
+        if change_value > Amount::from_sat(546) {
+            let change_output = bitcoin::TxOut {
+                value: change_value,
+                script_pubkey: self.get_litecoin_core_address_script_pubkey().await?,
+            };
+            match change_position {
+                Some(position) if position <= tx.output.len() => {
+                    tx.output.insert(position, change_output);
+                }
+                _ => tx.output.push(change_output),
+            }
+        }
+
+        let prevtxs = std::iter::once(serde_json::json!({
+            "txid": tx.input[0].previous_output.txid.to_string(),
+            "vout": tx.input[0].previous_output.vout,
+            "scriptPubKey": hex::encode(external_input_script_pubkey.to_bytes()),
+            "amount": amount_to_core_rpc_btc(external_input_value),
+        }))
+        .chain(selected.iter().map(|(utxo, value)| {
+            serde_json::json!({
+                "txid": utxo.txid.to_string(),
+                "vout": utxo.vout,
+                "scriptPubKey": utxo.script_pub_key,
+                "amount": amount_to_core_rpc_btc(*value),
+            })
+        }))
+        .collect::<Vec<_>>();
+
+        let tx_hex = bitcoin::consensus::encode::serialize_hex(&tx);
+        let signed: SignRawTransactionWithWalletResponse = self
+            .main_client
+            .request(
+                "signrawtransactionwithwallet",
+                jsonrpsee::rpc_params![tx_hex, prevtxs],
+            )
+            .await
+            .map_err(|err| error::BitcoinCoreRPC {
+                method: "signrawtransactionwithwallet".to_string(),
+                error: err,
+            })?;
+
+        if !signed.complete
+            && !signed
+                .errors
+                .iter()
+                .all(|err| is_op_drivechain_not_supported_message(&err.error))
+        {
             return Err(error::LitecoinCoreWalletTx::SignIncomplete);
         }
 
@@ -1568,6 +1728,7 @@ impl Wallet {
         sidechain_number: SidechainNumber,
         sidechain_address: String,
         value: Amount,
+        fee: Option<Amount>,
     ) -> Result<bitcoin::Txid, error::CreateDeposit> {
         let sidechain_ctip = self.inner.validator.try_get_ctip(sidechain_number)?;
         let sidechain_ctip_amount = sidechain_ctip
@@ -1598,19 +1759,77 @@ impl Wallet {
             output: vec![deposit_txout, address_txout],
         };
         let change_position = Some(tx.output.len());
-        let tx = self
-            .inner
-            .fund_and_sign_litecoin_core_transaction(tx, change_position)
-            .await?;
+        let tx = if let Some(ctip) = sidechain_ctip {
+            self.inner
+                .manually_fund_and_sign_litecoin_core_transaction(
+                    tx,
+                    ctip.value,
+                    op_drivechain_script(sidechain_number),
+                    fee.unwrap_or(Amount::from_sat(1_000)),
+                    change_position,
+                )
+                .await?
+        } else {
+            self.inner
+                .fund_and_sign_litecoin_core_transaction(tx, change_position)
+                .await?
+        };
         let txid = tx.compute_txid();
 
+        tracing::debug!(
+            %txid,
+            tx_hex = %bitcoin::consensus::encode::serialize_hex(&tx),
+            "Serialized Litecoin Core deposit transaction",
+        );
         tracing::debug!(%txid, "Attempting to broadcast Litecoin Core deposit transaction via RPC...");
-        let broadcast_txid = self
-            .inner
-            .broadcast_litecoin_core_transaction(&tx)
-            .await
-            .map_err(error::LitecoinCoreWalletTx::from)?;
-        let broadcast_successfully = broadcast_txid == txid;
+        let mut broadcast_successfully = match self.inner.broadcast_litecoin_core_transaction(&tx).await {
+            Ok(broadcast_txid) => broadcast_txid == txid,
+            Err(err) if is_op_drivechain_not_supported_rpc_error(&err) => false,
+            Err(err) => {
+                tracing::warn!(
+                    %txid,
+                    err = ?err,
+                    err = %ErrorChain::new(&err),
+                    "Litecoin Core RPC deposit broadcast failed, trying P2P fallback"
+                );
+                false
+            }
+        };
+
+        if !broadcast_successfully {
+            if self.p2p_broadcast_addrs().count() > 0 {
+                tracing::debug!(%txid, "Attempting to broadcast Litecoin Core deposit transaction via P2P to {} peer(s)...", self.p2p_broadcast_addrs().count());
+            } else {
+                tracing::warn!(%txid, "No P2P peers configured, skipping P2P attempt of failed Litecoin Core deposit transaction broadcast");
+            }
+
+            let block_height = self
+                .inner
+                .validator
+                .try_get_block_height()?
+                .unwrap_or_default();
+            let mut broadcast_results_stream = self
+                .p2p_broadcast_addrs()
+                .map(|peer_addr| {
+                    crate::p2p::broadcast_nonstandard_tx(
+                        peer_addr,
+                        block_height as i32,
+                        self.inner.magic,
+                        tx.clone(),
+                    )
+                    .map_ok(move |result| (peer_addr, result))
+                    .map_err(move |source| {
+                        error::CreateDeposit::BroadcastNonstandardTx { peer_addr, source }
+                    })
+                })
+                .collect::<futures::stream::FuturesUnordered<_>>();
+            while let Some((peer_addr, broadcast_success)) =
+                broadcast_results_stream.try_next().await?
+            {
+                tracing::debug!(%txid, "Broadcast Litecoin Core deposit transaction via P2P to {peer_addr} successfully: {broadcast_success}");
+                broadcast_successfully |= broadcast_success
+            }
+        }
 
         if broadcast_successfully {
             tracing::info!(%txid, "Broadcast Litecoin Core deposit transaction successfully");
@@ -1633,7 +1852,7 @@ impl Wallet {
     ) -> Result<bitcoin::Txid, error::CreateDeposit> {
         if self.inner.is_litecoin_core_wallet() {
             return self
-                .create_litecoin_core_deposit(sidechain_number, sidechain_address, value)
+                .create_litecoin_core_deposit(sidechain_number, sidechain_address, value, fee)
                 .await;
         }
 

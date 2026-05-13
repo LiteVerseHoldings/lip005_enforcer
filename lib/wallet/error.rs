@@ -588,6 +588,14 @@ pub enum LitecoinCoreWalletTx {
     BitcoinCoreRPC(#[from] BitcoinCoreRPC),
     #[error("failed to decode signed Litecoin Core wallet transaction")]
     DeserializeHex(#[from] bitcoin::consensus::encode::FromHexError),
+    #[error(transparent)]
+    GetNewAddress(#[from] GetNewAddress),
+    #[error("Litecoin Core wallet has insufficient spendable funds: required {required}, available {available}")]
+    #[diagnostic(code(litecoin_core_wallet_insufficient_funds))]
+    InsufficientFunds {
+        required: bitcoin::Amount,
+        available: bitcoin::Amount,
+    },
     #[error("Litecoin Core wallet did not fully sign transaction")]
     #[diagnostic(code(litecoin_core_wallet_incomplete_signature))]
     SignIncomplete,
@@ -598,7 +606,8 @@ impl ToStatus for LitecoinCoreWalletTx {
         match self {
             Self::BitcoinCoreRPC(err) => err.builder(),
             Self::DeserializeHex(err) => StatusBuilder::new(err),
-            Self::SignIncomplete => StatusBuilder::new(self),
+            Self::GetNewAddress(err) => err.builder(),
+            Self::InsufficientFunds { .. } | Self::SignIncomplete => StatusBuilder::new(self),
         }
     }
 }
