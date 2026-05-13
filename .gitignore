@@ -8,3 +8,4 @@ litecoin-data/
 litecoin-signet-enforcer-data/
 logs/
 target-signet/
+lifecycle-check-*/

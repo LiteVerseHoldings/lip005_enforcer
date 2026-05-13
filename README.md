@@ -55,21 +55,21 @@ cargo run -- \
   --node-rpc-pass=password
 ```
 
-Litecoin mode is currently validator-only. It intentionally rejects:
+Litecoin mode currently supports validator sync plus an experimental Litecoin
+Core wallet RPC backend for wallet address, balance, deposit transaction, and
+BMM request transaction calls. It still intentionally rejects:
 
-- `--enable-wallet`
 - `--enable-mempool`
 - `--node-blocks-dir`
 
-Those paths still depend on Bitcoin-specific wallet/address, P2P, block-file
-magic, and block decoding assumptions. Use Litecoin mode first against a
-patched Litecoin Core node with REST enabled and JSON-RPC available.
+Those remaining paths still depend on Bitcoin-specific P2P, block-file magic,
+getblocktemplate, and block decoding assumptions. Use Litecoin mode first
+against a patched Litecoin Core node with REST enabled and JSON-RPC available.
 
-Because wallet and mempool are disabled, Litecoin mode does not yet support the
-full Drivechain lifecycle: sidechain proposal transaction creation, deposits,
-BMM request transaction creation, or withdrawal bundles. The validator can sync
-and index Litecoin signet blocks; lifecycle transaction support needs a separate
-Litecoin wallet/mempool port.
+The wallet backend delegates coin selection and signing to a loaded Litecoin
+Core wallet via JSON-RPC. Full Drivechain lifecycle testing is still blocked on
+the Litecoin mempool/getblocktemplate mining path and withdrawal bundle
+activation path.
 
 # Interacting with the enforcer
 

@@ -793,20 +793,6 @@ async fn main() -> Result<()> {
     );
 
     if cli.mainchain.is_litecoin() {
-        if cli.enable_wallet {
-            #[derive(Debug, Diagnostic, Error)]
-            #[error("Litecoin mode does not support the built-in wallet yet")]
-            #[diagnostic(
-                code(bip300301_enforcer::litecoin_wallet_not_supported),
-                help(
-                    "run without `--enable-wallet`; Litecoin address, BDK wallet, and signing support need a separate port"
-                )
-            )]
-            struct LitecoinWalletNotSupported;
-
-            return Err(LitecoinWalletNotSupported.into());
-        }
-
         if cli.enable_mempool {
             #[derive(Debug, Diagnostic, Error)]
             #[error("Litecoin mode does not support the mempool/getblocktemplate server yet")]

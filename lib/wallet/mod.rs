@@ -21,6 +21,7 @@ use bdk_wallet::{
 };
 use bitcoin::{
     Amount, BlockHash, Network, Transaction, Txid,
+    amount::Denomination,
     hashes::{Hash as _, HashEngine, sha256, sha256d},
     script::PushBytesBuf,
 };
@@ -70,6 +71,29 @@ type BdkWallet = bdk_wallet::PersistedWallet<Persistence>;
 
 type ElectrumClient = BdkElectrumClient<bdk_electrum::electrum_client::Client>;
 type EsploraClient = bdk_esplora::esplora_client::AsyncClient;
+
+#[derive(Debug, Deserialize)]
+struct FundRawTransactionResponse {
+    hex: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SignRawTransactionWithWalletResponse {
+    hex: String,
+    complete: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreWalletBalances {
+    mine: CoreWalletMineBalances,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreWalletMineBalances {
+    trusted: serde_json::Number,
+    untrusted_pending: serde_json::Number,
+    immature: serde_json::Number,
+}
 
 #[non_exhaustive]
 enum ChainSourceClient {
@@ -327,7 +351,11 @@ impl WalletInner {
             let validator_network = validator.network();
             bdk_wallet::bitcoin::Network::from_str(validator_network.to_string().as_str())?
         };
-        if network == bdk_wallet::bitcoin::Network::Signet && signet_challenge.is_none() {
+        let litecoin_core_wallet = config.mainchain.is_litecoin();
+        if !litecoin_core_wallet
+            && network == bdk_wallet::bitcoin::Network::Signet
+            && signet_challenge.is_none()
+        {
             return Err(error::InitWallet::NoSignetChallengeFound);
         }
 
@@ -344,8 +372,14 @@ impl WalletInner {
             .await
             .map_err(error::InitWallet::OpenConnection)?;
 
-        let chain_source_client =
-            Self::init_chain_source_client(&config.wallet_opts, network).await?;
+        let chain_source_client = if litecoin_core_wallet {
+            tracing::info!(
+                "Litecoin wallet mode uses the loaded Litecoin Core wallet over JSON-RPC"
+            );
+            None
+        } else {
+            Self::init_chain_source_client(&config.wallet_opts, network).await?
+        };
         let db_connection = Self::init_db_connection(data_dir)?;
 
         // If we:
@@ -353,20 +387,22 @@ impl WalletInner {
         // 2. It's plaintext
         //
         // We can just go ahead and unlock the wallet right away.
-        let bitcoin_wallet =
-            if let Some(Either::Left(mnemonic)) = WalletInner::read_db_mnemonic(&db_connection)? {
-                tracing::debug!("found plaintext mnemonic, going straight to initialization");
-                let initialized = WalletInner::initialize_wallet_from_mnemonic(
-                    &mnemonic,
-                    network,
-                    &mut wallet_database,
-                )
-                .await?;
+        let bitcoin_wallet = if litecoin_core_wallet {
+            None
+        } else if let Some(Either::Left(mnemonic)) = WalletInner::read_db_mnemonic(&db_connection)?
+        {
+            tracing::debug!("found plaintext mnemonic, going straight to initialization");
+            let initialized = WalletInner::initialize_wallet_from_mnemonic(
+                &mnemonic,
+                network,
+                &mut wallet_database,
+            )
+            .await?;
 
-                Some(initialized)
-            } else {
-                None
-            };
+            Some(initialized)
+        } else {
+            None
+        };
 
         tracing::debug!(
             message = "wallet inner: wired together components",
@@ -467,6 +503,78 @@ impl WalletInner {
             start.elapsed().unwrap_or_default()
         );
         RwLockWriteGuardSome::new(write_guard).ok_or(error::NotUnlocked)
+    }
+
+    fn is_litecoin_core_wallet(&self) -> bool {
+        self.config.mainchain.is_litecoin()
+    }
+
+    fn core_amount(
+        value: &serde_json::Number,
+    ) -> Result<Amount, bitcoin::amount::ParseAmountError> {
+        Amount::from_str_in(&value.to_string(), Denomination::Bitcoin)
+    }
+
+    async fn get_litecoin_core_balances(
+        &self,
+    ) -> Result<CoreWalletBalances, error::BitcoinCoreRPC> {
+        use jsonrpsee::core::client::ClientT as _;
+
+        self.main_client
+            .request("getbalances", jsonrpsee::rpc_params![])
+            .await
+            .map_err(|err| error::BitcoinCoreRPC {
+                method: "getbalances".to_string(),
+                error: err,
+            })
+    }
+
+    async fn get_litecoin_core_address(&self) -> Result<String, error::BitcoinCoreRPC> {
+        use jsonrpsee::core::client::ClientT as _;
+
+        self.main_client
+            .request("getnewaddress", jsonrpsee::rpc_params!["", "bech32"])
+            .await
+            .map_err(|err| error::BitcoinCoreRPC {
+                method: "getnewaddress".to_string(),
+                error: err,
+            })
+    }
+
+    async fn fund_and_sign_litecoin_core_transaction(
+        &self,
+        tx: Transaction,
+    ) -> Result<Transaction, error::LitecoinCoreWalletTx> {
+        use jsonrpsee::core::client::ClientT as _;
+
+        let tx_hex = bitcoin::consensus::encode::serialize_hex(&tx);
+        let funded: FundRawTransactionResponse = self
+            .main_client
+            .request("fundrawtransaction", jsonrpsee::rpc_params![tx_hex])
+            .await
+            .map_err(|err| error::BitcoinCoreRPC {
+                method: "fundrawtransaction".to_string(),
+                error: err,
+            })?;
+
+        let signed: SignRawTransactionWithWalletResponse = self
+            .main_client
+            .request(
+                "signrawtransactionwithwallet",
+                jsonrpsee::rpc_params![funded.hex],
+            )
+            .await
+            .map_err(|err| error::BitcoinCoreRPC {
+                method: "signrawtransactionwithwallet".to_string(),
+                error: err,
+            })?;
+
+        if !signed.complete {
+            return Err(error::LitecoinCoreWalletTx::SignIncomplete);
+        }
+
+        let tx = bitcoin::consensus::encode::deserialize_hex::<Transaction>(&signed.hex)?;
+        Ok(tx)
     }
 
     fn read_db_mnemonic(
@@ -841,6 +949,9 @@ impl Wallet {
     }
 
     pub async fn is_initialized(&self) -> bool {
+        if self.inner.is_litecoin_core_wallet() {
+            return self.inner.get_litecoin_core_balances().await.is_ok();
+        }
         self.inner.bitcoin_wallet.read().await.is_some()
     }
 
@@ -1333,6 +1444,61 @@ impl Wallet {
         }
     }
 
+    async fn create_litecoin_core_deposit(
+        &self,
+        sidechain_number: SidechainNumber,
+        sidechain_address: String,
+        value: Amount,
+    ) -> Result<bitcoin::Txid, error::CreateDeposit> {
+        let sidechain_ctip = self.inner.validator.try_get_ctip(sidechain_number)?;
+        let sidechain_ctip_amount = sidechain_ctip
+            .as_ref()
+            .map(|ctip| ctip.value)
+            .unwrap_or(Amount::ZERO);
+        let deposit_txout =
+            messages::create_m5_deposit_output(sidechain_number, sidechain_ctip_amount, value);
+        let sidechain_address_data = PushBytesBuf::try_from(sidechain_address.into_bytes())
+            .map_err(error::CreateDeposit::ConvertSidechainAddress)?;
+        let address_txout = messages::create_op_return_output(sidechain_address_data)
+            .expect("PushBytesBuf always builds a valid OP_RETURN output");
+
+        let input = sidechain_ctip
+            .map(|ctip| bitcoin::TxIn {
+                previous_output: ctip.outpoint,
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::default(),
+            })
+            .into_iter()
+            .collect();
+
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input,
+            output: vec![deposit_txout, address_txout],
+        };
+        let tx = self
+            .inner
+            .fund_and_sign_litecoin_core_transaction(tx)
+            .await?;
+        let txid = tx.compute_txid();
+
+        tracing::debug!(%txid, "Attempting to broadcast Litecoin Core deposit transaction via RPC...");
+        let broadcast_successfully =
+            crate::rpc_client::broadcast_transaction(&self.inner.main_client, &tx)
+                .await
+                .map_err(error::CreateDeposit::BroadcastTx)?
+                .is_some();
+
+        if broadcast_successfully {
+            tracing::info!(%txid, "Broadcast Litecoin Core deposit transaction successfully");
+            Ok(txid)
+        } else {
+            Err(error::CreateDeposit::BroadcastUnsuccessful { txid })
+        }
+    }
+
     /// Creates a deposit transaction, persists it to the database, and returns the TXID.
     /// This is also known as a M5 message, in BIP300 nomenclature.
     ///
@@ -1344,6 +1510,12 @@ impl Wallet {
         value: Amount,
         fee: Option<Amount>,
     ) -> Result<bitcoin::Txid, error::CreateDeposit> {
+        if self.inner.is_litecoin_core_wallet() {
+            return self
+                .create_litecoin_core_deposit(sidechain_number, sidechain_address, value)
+                .await;
+        }
+
         let block_height = self
             .inner
             .validator
@@ -1430,6 +1602,17 @@ impl Wallet {
     pub async fn get_wallet_balance(
         &self,
     ) -> Result<(bdk_wallet::Balance, bool), error::GetWalletBalance> {
+        if self.inner.is_litecoin_core_wallet() {
+            let balances = self.inner.get_litecoin_core_balances().await?.mine;
+            let balance = bdk_wallet::Balance {
+                immature: WalletInner::core_amount(&balances.immature)?,
+                trusted_pending: Amount::ZERO,
+                untrusted_pending: WalletInner::core_amount(&balances.untrusted_pending)?,
+                confirmed: WalletInner::core_amount(&balances.trusted)?,
+            };
+            return Ok((balance, true));
+        }
+
         let has_synced = self.inner.last_sync.read().await.is_some();
 
         let balance = self.inner.read_wallet().await?.balance();
@@ -2038,6 +2221,53 @@ impl Wallet {
         with_connection(&connection)
     }
 
+    async fn create_litecoin_core_bmm_request(
+        &self,
+        sidechain_number: SidechainNumber,
+        prev_mainchain_block_hash: bdk_wallet::bitcoin::BlockHash,
+        sidechain_block_hash: BmmCommitment,
+        bid_amount: bdk_wallet::bitcoin::Amount,
+        locktime: bdk_wallet::bitcoin::absolute::LockTime,
+    ) -> Result<Option<bdk_wallet::bitcoin::Transaction>, error::CreateBmmRequest> {
+        let message = Self::bmm_request_message(
+            sidechain_number,
+            prev_mainchain_block_hash,
+            sidechain_block_hash,
+        )
+        .map_err(error::BuildBmmTx::from)?;
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: locktime,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                script_pubkey: message,
+                value: bid_amount,
+            }],
+        };
+        let tx = self
+            .inner
+            .fund_and_sign_litecoin_core_transaction(tx)
+            .await?;
+        let txid = tx.compute_txid();
+        let stored = self
+            .insert_new_bmm_request(
+                sidechain_number,
+                prev_mainchain_block_hash,
+                sidechain_block_hash,
+            )
+            .await?;
+
+        if crate::rpc_client::broadcast_transaction(&self.inner.main_client, &tx)
+            .await
+            .map_err(error::CreateBmmRequestInner::BroadcastTx)?
+            .is_none()
+        {
+            return Err(error::CreateBmmRequestInner::BroadcastUnsuccessful { txid }.into());
+        }
+
+        if stored { Ok(Some(tx)) } else { Ok(None) }
+    }
+
     /// Creates a BMM request transaction. Broadcasts via p2p whitelist only.
     /// Returns `Some(tx)` if the BMM request was stored, `None` if the BMM
     /// request was not stored due to pre-existing request with the same
@@ -2050,6 +2280,18 @@ impl Wallet {
         bid_amount: bdk_wallet::bitcoin::Amount,
         locktime: bdk_wallet::bitcoin::absolute::LockTime,
     ) -> Result<Option<bdk_wallet::bitcoin::Transaction>, error::CreateBmmRequest> {
+        if self.inner.is_litecoin_core_wallet() {
+            return self
+                .create_litecoin_core_bmm_request(
+                    sidechain_number,
+                    prev_mainchain_block_hash,
+                    sidechain_block_hash,
+                    bid_amount,
+                    locktime,
+                )
+                .await;
+        }
+
         tracing::debug!("create_bmm_request: building transaction");
         let psbt = self
             .build_bmm_tx(
@@ -2152,6 +2394,14 @@ impl Wallet {
             })
             .await?;
         Ok(address)
+    }
+
+    pub async fn get_new_address_string(&self) -> Result<String, error::GetNewAddress> {
+        if self.inner.is_litecoin_core_wallet() {
+            return Ok(self.inner.get_litecoin_core_address().await?);
+        }
+
+        Ok(self.get_new_address().await?.to_string())
     }
 
     pub async fn put_withdrawal_bundle(

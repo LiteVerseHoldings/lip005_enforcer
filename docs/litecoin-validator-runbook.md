@@ -87,13 +87,14 @@ cargo run -- `
   --node-zmq-addr-sequence tcp://127.0.0.1:39000
 ```
 
-Litecoin mode is validator-only. Do not pass wallet, mempool, or block-file
-options.
+Litecoin mode supports validator sync and an experimental `--enable-wallet`
+path backed by the loaded Litecoin Core wallet. Do not pass mempool or
+block-file options yet.
 
 This means the current Litecoin path verifies block sync and validator state,
-but not the full Drivechain lifecycle. Sidechain proposal transactions,
-deposits, BMM request transactions, and withdrawal bundles still require a
-Litecoin wallet/mempool port.
+and can delegate basic wallet funding/signing calls to Litecoin Core. The full
+Drivechain lifecycle is still blocked on the Litecoin mempool/getblocktemplate
+mining path and withdrawal bundle activation path.
 
 ## Mine A Test Block
 

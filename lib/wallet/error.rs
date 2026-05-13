@@ -583,6 +583,27 @@ impl ToStatus for BitcoinCoreRPC {
 }
 
 #[derive(Debug, Diagnostic, Error)]
+pub enum LitecoinCoreWalletTx {
+    #[error(transparent)]
+    BitcoinCoreRPC(#[from] BitcoinCoreRPC),
+    #[error("failed to decode signed Litecoin Core wallet transaction")]
+    DeserializeHex(#[from] bitcoin::consensus::encode::FromHexError),
+    #[error("Litecoin Core wallet did not fully sign transaction")]
+    #[diagnostic(code(litecoin_core_wallet_incomplete_signature))]
+    SignIncomplete,
+}
+
+impl ToStatus for LitecoinCoreWalletTx {
+    fn builder(&self) -> StatusBuilder<'_> {
+        match self {
+            Self::BitcoinCoreRPC(err) => err.builder(),
+            Self::DeserializeHex(err) => StatusBuilder::new(err),
+            Self::SignIncomplete => StatusBuilder::new(self),
+        }
+    }
+}
+
+#[derive(Debug, Diagnostic, Error)]
 #[error("failed to consensus encode block")]
 #[diagnostic(code(encode_block_error))]
 pub struct EncodeBlock(#[from] pub bitcoin::io::Error);
@@ -700,6 +721,8 @@ pub enum CreateDeposit {
     #[error("failed to convert sidechain address to PushBytesBuf")]
     ConvertSidechainAddress(#[source] bitcoin::script::PushBytesError),
     #[error(transparent)]
+    LitecoinCoreWalletTx(#[from] LitecoinCoreWalletTx),
+    #[error(transparent)]
     Psbt(#[from] CreateDepositPsbt),
     #[error(transparent)]
     SignTransaction(#[from] WalletSignTransaction),
@@ -716,6 +739,7 @@ impl ToStatus for CreateDeposit {
             | Self::BroadcastNonstandardTx { .. }
             | Self::BroadcastUnsuccessful { .. }
             | Self::ConvertSidechainAddress(_) => StatusBuilder::new(self),
+            Self::LitecoinCoreWalletTx(err) => err.builder(),
             Self::Psbt(err) => err.builder(),
             Self::SignTransaction(err) => err.builder(),
             Self::TryGetCtip(err) => err.builder(),
@@ -1175,16 +1199,22 @@ impl ToStatus for GenerateBlock {
 #[derive(Diagnostic, Debug, Error)]
 pub enum GetWalletBalance {
     #[error(transparent)]
+    BitcoinCoreRPC(#[from] BitcoinCoreRPC),
+    #[error(transparent)]
     NotSynced(#[from] NotSynced),
     #[error(transparent)]
     NotUnlocked(#[from] NotUnlocked),
+    #[error("failed to parse Litecoin Core wallet amount")]
+    ParseAmount(#[from] bitcoin::amount::ParseAmountError),
 }
 
 impl ToStatus for GetWalletBalance {
     fn builder(&self) -> StatusBuilder<'_> {
         match self {
+            Self::BitcoinCoreRPC(err) => err.builder(),
             Self::NotSynced(err) => err.builder(),
             Self::NotUnlocked(err) => err.builder(),
+            Self::ParseAmount(err) => StatusBuilder::new(err),
         }
     }
 }
@@ -1314,12 +1344,16 @@ impl ToStatus for BuildBmmTx {
 pub(in crate::wallet) enum CreateBmmRequestInner {
     #[error("failed to build BMM tx")]
     BuildBmmTx(#[from] BuildBmmTx),
+    #[error("failed to broadcast tx")]
+    BroadcastTx(#[source] jsonrpsee::core::ClientError),
     #[error("failed to broadcast nonstandard tx")]
     BroadcastNonstandardTx(#[source] bitcoin_send_tx_p2p::Error),
     #[error("broadcast deposit transaction failed: {txid}")]
     BroadcastUnsuccessful { txid: bitcoin::Txid },
     #[error(transparent)]
     GetHeaderInfo(#[from] validator::GetHeaderInfoError),
+    #[error(transparent)]
+    LitecoinCoreWalletTx(#[from] LitecoinCoreWalletTx),
     #[error("rusqlite error")]
     Rusqlite(#[from] rusqlite::Error),
     #[error("failed to sign BMM tx")]
@@ -1331,8 +1365,10 @@ impl ToStatus for CreateBmmRequestInner {
         match self {
             Self::BuildBmmTx(err) => StatusBuilder::with_code(self, err.builder()),
             Self::GetHeaderInfo(err) => err.builder(),
+            Self::LitecoinCoreWalletTx(err) => err.builder(),
             Self::SignTx(err) => StatusBuilder::with_code(self, err.builder()),
-            Self::BroadcastNonstandardTx(_)
+            Self::BroadcastTx(_)
+            | Self::BroadcastNonstandardTx(_)
             | Self::BroadcastUnsuccessful { .. }
             | Self::Rusqlite(_) => StatusBuilder::new(self),
         }
@@ -1362,6 +1398,8 @@ impl ToStatus for CreateBmmRequest {
 #[derive(Debug, Diagnostic, Error)]
 pub enum GetNewAddress {
     #[error(transparent)]
+    BitcoinCoreRPC(#[from] BitcoinCoreRPC),
+    #[error(transparent)]
     NotUnlocked(#[from] NotUnlocked),
     #[error(transparent)]
     Persistence(#[from] Persistence),
@@ -1370,6 +1408,7 @@ pub enum GetNewAddress {
 impl ToStatus for GetNewAddress {
     fn builder(&self) -> StatusBuilder<'_> {
         match self {
+            Self::BitcoinCoreRPC(err) => err.builder(),
             Self::NotUnlocked(err) => err.builder(),
             Self::Persistence(err) => StatusBuilder::new(err),
         }

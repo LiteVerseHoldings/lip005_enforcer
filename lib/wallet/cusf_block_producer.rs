@@ -180,6 +180,12 @@ impl CusfEnforcer for Wallet {
             };
         tracing::debug!(%tip_hash, "Synced validator");
 
+        if self.inner.is_litecoin_core_wallet() {
+            self.inner.set_last_synced_now().await;
+            tracing::debug!(%tip_hash, "Skipped BDK wallet sync for Litecoin Core wallet backend");
+            return Ok(());
+        }
+
         let sync_wallet_to_tip = sync_wallet_to_tip(self, tip_hash, None);
         tokio::pin!(sync_wallet_to_tip);
         match futures::future::select(shutdown_signal, sync_wallet_to_tip).await {
@@ -210,7 +216,8 @@ impl CusfEnforcer for Wallet {
         // `sync_wallet_to_tip` would fail in `get_block_infos` and bubble an
         // error up that prevents the standalone driver from issuing
         // `invalidateblock` to bitcoind.
-        if matches!(res, ConnectBlockAction::Accept { .. }) {
+        if matches!(res, ConnectBlockAction::Accept { .. }) && !self.inner.is_litecoin_core_wallet()
+        {
             let () = sync_wallet_to_tip(self, block.block_hash(), Some(block)).await?;
         }
         Ok(res)

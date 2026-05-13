@@ -215,13 +215,11 @@ impl WalletService for crate::wallet::Wallet {
         _request: tonic::Request<CreateNewAddressRequest>,
     ) -> std::result::Result<tonic::Response<CreateNewAddressResponse>, tonic::Status> {
         let address = self
-            .get_new_address()
+            .get_new_address_string()
             .await
             .map_err(|err| err.builder().to_status())?;
 
-        let response = CreateNewAddressResponse {
-            address: address.to_string(),
-        };
+        let response = CreateNewAddressResponse { address };
         Ok(tonic::Response::new(response))
     }
 

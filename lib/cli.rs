@@ -416,9 +416,10 @@ fn get_long_version() -> clap::builder::Str {
 #[derive(Clone, Parser)]
 #[clap(version, long_version = get_long_version())]
 pub struct Config {
-    /// Mainchain node family to connect to. Litecoin mode is validator-only:
-    /// wallet, mempool, and block-file fast sync are intentionally disabled
-    /// until Litecoin address and block-file parameters are fully ported.
+    /// Mainchain node family to connect to. Litecoin mode supports validator
+    /// sync and an experimental Litecoin Core wallet RPC backend. Mempool and
+    /// block-file fast sync are intentionally disabled until Litecoin block
+    /// template and block-file parameters are fully ported.
     #[arg(long = "mainchain", default_value_t = Mainchain::default(), value_enum)]
     pub mainchain: Mainchain,
     /// Directory to store wallet + drivechain + validator data.
