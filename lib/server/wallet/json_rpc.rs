@@ -61,6 +61,102 @@ fn deserialize_transaction_or_legacy_zero_input(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::{
+        OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Witness,
+        consensus::Encodable as _,
+        opcodes::all::OP_RETURN,
+        script::Builder,
+    };
+
+    fn legacy_zero_input_tx_bytes(tx: &Transaction) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        tx.version
+            .consensus_encode(&mut bytes)
+            .expect("writing to Vec cannot fail");
+        tx.input
+            .consensus_encode(&mut bytes)
+            .expect("writing to Vec cannot fail");
+        tx.output
+            .consensus_encode(&mut bytes)
+            .expect("writing to Vec cannot fail");
+        tx.lock_time
+            .consensus_encode(&mut bytes)
+            .expect("writing to Vec cannot fail");
+        bytes
+    }
+
+    fn blinded_m6_template() -> Transaction {
+        Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![
+                TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: Builder::new()
+                        .push_opcode(OP_RETURN)
+                        .push_slice(100_u64.to_be_bytes())
+                        .into_script(),
+                },
+                TxOut {
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn decodes_legacy_zero_input_withdrawal_bundle_transaction() {
+        let tx = blinded_m6_template();
+        let tx_bytes = legacy_zero_input_tx_bytes(&tx);
+
+        assert!(bitcoin::consensus::deserialize::<Transaction>(&tx_bytes).is_err());
+
+        let decoded = deserialize_transaction_or_legacy_zero_input(&tx_bytes)
+            .expect("legacy zero-input tx should decode");
+
+        assert_eq!(decoded, tx);
+        assert!(crate::types::BlindedM6::try_from(Cow::Borrowed(&decoded)).is_ok());
+    }
+
+    #[test]
+    fn rejects_legacy_zero_input_transaction_with_trailing_bytes() {
+        let tx = blinded_m6_template();
+        let mut tx_bytes = legacy_zero_input_tx_bytes(&tx);
+        tx_bytes.push(0);
+
+        assert!(deserialize_transaction_or_legacy_zero_input(&tx_bytes).is_err());
+    }
+
+    #[test]
+    fn still_decodes_standard_non_empty_input_transactions() {
+        let tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let tx_bytes = bitcoin::consensus::encode::serialize(&tx);
+
+        let decoded = deserialize_transaction_or_legacy_zero_input(&tx_bytes)
+            .expect("standard tx should decode");
+
+        assert_eq!(decoded, tx);
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateSidechainProposalParams {
     pub sidechain_id: SidechainNumber,
