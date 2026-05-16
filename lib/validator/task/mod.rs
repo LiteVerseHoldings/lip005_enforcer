@@ -819,28 +819,6 @@ pub(in crate::validator) fn connect_block(
     let coinbase_msg_diffs = coinbase_msg_diffs.diffs();
     let failed_sidechain_proposals_diff = handle_failed_sidechain_proposals(rwtxn, dbs, height)?;
     let () = failed_sidechain_proposals_diff.apply(rwtxn, &dbs.proposal_id_to_sidechain, height)?;
-    let failed_m6ids_diff = handle_failed_m6ids(rwtxn, dbs, height)?;
-    let () = failed_m6ids_diff.apply(rwtxn, &dbs.active_sidechains, height)?;
-    events.extend(
-        failed_m6ids_diff
-            .0
-            .iter()
-            .flat_map(|(sidechain_id, failed_m6ids)| {
-                failed_m6ids.values().map(|(m6id, _)| {
-                    WithdrawalBundleEvent {
-                        m6id: *m6id,
-                        sidechain_id: *sidechain_id,
-                        kind: WithdrawalBundleEventKind::Failed,
-                    }
-                    .into()
-                })
-            }),
-    );
-    let coinbase_diff = diff::Coinbase {
-        msgs: coinbase_msg_diffs,
-        failed_proposals: failed_sidechain_proposals_diff,
-        failed_m6ids: failed_m6ids_diff,
-    };
     tracing::trace!("Handled coinbase tx, handling other txs...");
     let block_hash = block.header.block_hash();
     let prev_mainchain_block_hash = block.header.prev_blockhash;
@@ -882,6 +860,28 @@ pub(in crate::validator) fn connect_block(
     }
     // Tx diffs are already applied
     let tx_diffs = tx_diffs.diffs();
+    let failed_m6ids_diff = handle_failed_m6ids(rwtxn, dbs, height)?;
+    let () = failed_m6ids_diff.apply(rwtxn, &dbs.active_sidechains, height)?;
+    events.extend(
+        failed_m6ids_diff
+            .0
+            .iter()
+            .flat_map(|(sidechain_id, failed_m6ids)| {
+                failed_m6ids.values().map(|(m6id, _)| {
+                    WithdrawalBundleEvent {
+                        m6id: *m6id,
+                        sidechain_id: *sidechain_id,
+                        kind: WithdrawalBundleEventKind::Failed,
+                    }
+                    .into()
+                })
+            }),
+    );
+    let coinbase_diff = diff::Coinbase {
+        msgs: coinbase_msg_diffs,
+        failed_proposals: failed_sidechain_proposals_diff,
+        failed_m6ids: failed_m6ids_diff,
+    };
     tracing::trace!("Handled block txs");
     let block_info = BlockInfo {
         bmm_commitments: accepted_bmm_requests.into_iter().collect(),
@@ -1495,10 +1495,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        messages::{M4AckBundles, M8BmmRequest, create_m5_deposit_output},
+        messages::{M4AckBundles, M8BmmRequest, compute_m6id, create_m5_deposit_output},
         types::{
-            BmmCommitment, BmmCommitments, Ctip, M6id, SidechainDescription, SidechainNumber,
-            SidechainProposal,
+            BlockEvent, BmmCommitment, BmmCommitments, Ctip, M6id, PendingM6idInfo,
+            SidechainDescription, SidechainNumber, SidechainProposal,
         },
         validator::test_utils::{create_test_dbs, test_sidechain},
     };
@@ -1560,6 +1560,35 @@ mod tests {
             }],
             output: vec![treasury_output, address_output],
         }
+    }
+
+    fn build_m6_tx(
+        sidechain_number: SidechainNumber,
+        old_ctip_outpoint: OutPoint,
+        old_ctip_value: Amount,
+        payout: Amount,
+        fee: Amount,
+    ) -> Result<(Transaction, M6id)> {
+        let new_ctip_value = (old_ctip_value - payout) - fee;
+        let treasury_output =
+            create_m5_deposit_output(sidechain_number, Amount::ZERO, new_ctip_value);
+        let payout_output = TxOut {
+            script_pubkey: ScriptBuf::new(),
+            value: payout,
+        };
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: old_ctip_outpoint,
+                ..TxIn::default()
+            }],
+            output: vec![treasury_output, payout_output],
+        };
+        let (m6id, parsed_sidechain_number) =
+            compute_m6id(tx.clone(), old_ctip_value).into_diagnostic()?;
+        assert_eq!(parsed_sidechain_number, sidechain_number);
+        Ok((tx, m6id))
     }
 
     fn dummy_block_hash(byte: u8) -> BlockHash {
@@ -1771,6 +1800,81 @@ mod tests {
     }
 
     // ── handle_m5_m6 ──
+
+    #[test]
+    fn connect_block_includes_m6_before_expiring_old_pending_bundle() -> Result<()> {
+        let (_dir, dbs) = create_test_dbs()?;
+        let mut rwtxn = dbs.write_txn().into_diagnostic()?;
+        let sc = SidechainNumber(1);
+        let old_ctip = Ctip {
+            outpoint: OutPoint {
+                txid: Txid::from_byte_array([0x11; 32]),
+                vout: 0,
+            },
+            value: Amount::from_sat(10_000),
+        };
+        dbs.active_sidechains
+            .put_sidechain(&mut rwtxn, &sc, &test_sidechain(1, 0))
+            .into_diagnostic()?;
+        dbs.active_sidechains
+            .put_ctip(&mut rwtxn, sc, &old_ctip)
+            .into_diagnostic()?;
+
+        let (m6_tx, m6id) = build_m6_tx(
+            sc,
+            old_ctip.outpoint,
+            old_ctip.value,
+            Amount::from_sat(1_000),
+            Amount::from_sat(100),
+        )?;
+        dbs.active_sidechains
+            .with_pending_withdrawal_entry(&mut rwtxn, &sc, m6id, |entry| {
+                let info = entry.or_insert(PendingM6idInfo::new(0));
+                info.vote_count = WITHDRAWAL_BUNDLE_INCLUSION_THRESHOLD + 1;
+            })
+            .into_diagnostic()?;
+
+        let prev_hash = BlockHash::all_zeros();
+        let block = build_test_block(prev_hash, vec![m6_tx]);
+        dbs.block_hashes
+            .put_headers(
+                &mut rwtxn,
+                &[(block.header, u32::from(WITHDRAWAL_BUNDLE_MAX_AGE) + 1)],
+            )
+            .into_diagnostic()?;
+
+        let event = connect_block(&mut rwtxn, &dbs, &block).into_diagnostic()?;
+        let Event::ConnectBlock { block_info, .. } = event else {
+            panic!("expected connect block event");
+        };
+        assert!(block_info.events.iter().any(|event| {
+            matches!(
+                event,
+                BlockEvent::WithdrawalBundle(WithdrawalBundleEvent {
+                    m6id: event_m6id,
+                    kind: WithdrawalBundleEventKind::Succeeded { .. },
+                    ..
+                }) if *event_m6id == m6id
+            )
+        }));
+        assert!(!block_info.events.iter().any(|event| {
+            matches!(
+                event,
+                BlockEvent::WithdrawalBundle(WithdrawalBundleEvent {
+                    m6id: event_m6id,
+                    kind: WithdrawalBundleEventKind::Failed,
+                    ..
+                }) if *event_m6id == m6id
+            )
+        }));
+        let ctip = dbs
+            .active_sidechains
+            .ctip()
+            .get(&rwtxn, &sc)
+            .into_diagnostic()?;
+        assert_eq!(ctip.outpoint.txid, block.txdata[1].compute_txid());
+        Ok(())
+    }
 
     #[test]
     fn handle_m5_m6_plain_tx_returns_none() -> Result<()> {
