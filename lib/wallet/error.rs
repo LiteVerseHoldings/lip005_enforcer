@@ -590,7 +590,9 @@ pub enum LitecoinCoreWalletTx {
     DeserializeHex(#[from] bitcoin::consensus::encode::FromHexError),
     #[error(transparent)]
     GetNewAddress(#[from] GetNewAddress),
-    #[error("Litecoin Core wallet has insufficient spendable funds: required {required}, available {available}")]
+    #[error(
+        "Litecoin Core wallet has insufficient spendable funds: required {required}, available {available}"
+    )]
     #[diagnostic(code(litecoin_core_wallet_insufficient_funds))]
     InsufficientFunds {
         required: bitcoin::Amount,
@@ -941,7 +943,11 @@ pub enum InitialSync {
     #[error("received shutdown signal")]
     Shutdown,
     #[error(transparent)]
+    GetBlockInfos(#[from] validator::GetBlockInfosError),
+    #[error(transparent)]
     Validator(#[from] <Validator as CusfEnforcer>::SyncError),
+    #[error("failed to handle wallet metadata")]
+    WalletMetadata(#[from] HandleConnectBlock),
     #[error(transparent)]
     Wallet(#[from] SyncWalletToTip),
 }
@@ -949,7 +955,11 @@ pub enum InitialSync {
 #[derive(Debug, Diagnostic, Error)]
 pub enum ConnectBlock {
     #[error(transparent)]
+    GetBlockInfos(#[from] validator::GetBlockInfosError),
+    #[error(transparent)]
     Validator(#[from] <Validator as CusfEnforcer>::ConnectBlockError),
+    #[error("failed to handle wallet metadata")]
+    WalletMetadata(#[from] HandleConnectBlock),
     #[error(transparent)]
     Wallet(#[from] SyncWalletToTip),
 }

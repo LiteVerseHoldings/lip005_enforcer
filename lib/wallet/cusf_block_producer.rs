@@ -13,9 +13,12 @@ use tracing::instrument;
 
 use crate::{
     messages::{CoinbaseBuilder, parse_m8_tx},
+    types::WITHDRAWAL_BUNDLE_MAX_AGE,
     validator::Validator,
     wallet::{Wallet, error},
 };
+
+const LITECOIN_CORE_METADATA_SYNC_ANCESTORS: usize = (WITHDRAWAL_BUNDLE_MAX_AGE as usize) + 2;
 
 /// Sync wallet to tip.
 /// The inner validator is expected to already be synced to the same tip.
@@ -181,8 +184,19 @@ impl CusfEnforcer for Wallet {
         tracing::debug!(%tip_hash, "Synced validator");
 
         if self.inner.is_litecoin_core_wallet() {
+            let block_infos = self
+                .inner
+                .validator
+                .get_block_infos(&tip_hash, LITECOIN_CORE_METADATA_SYNC_ANCESTORS)?;
+            for (_header_info, block_info) in &block_infos {
+                self.inner.handle_block_metadata(block_info).await?;
+            }
             self.inner.set_last_synced_now().await;
-            tracing::debug!(%tip_hash, "Skipped BDK wallet sync for Litecoin Core wallet backend");
+            tracing::debug!(
+                %tip_hash,
+                blocks = block_infos.len(),
+                "Synced Litecoin Core wallet metadata without BDK wallet sync",
+            );
             return Ok(());
         }
 
@@ -216,9 +230,17 @@ impl CusfEnforcer for Wallet {
         // `sync_wallet_to_tip` would fail in `get_block_infos` and bubble an
         // error up that prevents the standalone driver from issuing
         // `invalidateblock` to bitcoind.
-        if matches!(res, ConnectBlockAction::Accept { .. }) && !self.inner.is_litecoin_core_wallet()
-        {
-            let () = sync_wallet_to_tip(self, block.block_hash(), Some(block)).await?;
+        if matches!(res, ConnectBlockAction::Accept { .. }) {
+            if self.inner.is_litecoin_core_wallet() {
+                let block_infos = self
+                    .inner
+                    .validator
+                    .get_block_infos(&block.block_hash(), 0)?;
+                let (_header_info, block_info) = block_infos.last();
+                self.inner.handle_block_metadata(block_info).await?;
+            } else {
+                let () = sync_wallet_to_tip(self, block.block_hash(), Some(block)).await?;
+            }
         }
         Ok(res)
     }

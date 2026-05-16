@@ -741,12 +741,12 @@ impl WalletInner {
                 method: "listunspent".to_string(),
                 error: jsonrpsee::core::client::Error::Custom(err.to_string()),
             })?;
-            selected_value = selected_value
-                .checked_add(value)
-                .ok_or(error::LitecoinCoreWalletTx::InsufficientFunds {
+            selected_value = selected_value.checked_add(value).ok_or(
+                error::LitecoinCoreWalletTx::InsufficientFunds {
                     required: required_wallet_value,
                     available: selected_value,
-                })?;
+                },
+            )?;
             selected.push((utxo, value));
             if selected_value >= required_wallet_value {
                 break;
@@ -1782,19 +1782,20 @@ impl Wallet {
             "Serialized Litecoin Core deposit transaction",
         );
         tracing::debug!(%txid, "Attempting to broadcast Litecoin Core deposit transaction via RPC...");
-        let mut broadcast_successfully = match self.inner.broadcast_litecoin_core_transaction(&tx).await {
-            Ok(broadcast_txid) => broadcast_txid == txid,
-            Err(err) if is_op_drivechain_not_supported_rpc_error(&err) => false,
-            Err(err) => {
-                tracing::warn!(
-                    %txid,
-                    err = ?err,
-                    err = %ErrorChain::new(&err),
-                    "Litecoin Core RPC deposit broadcast failed, trying P2P fallback"
-                );
-                false
-            }
-        };
+        let mut broadcast_successfully =
+            match self.inner.broadcast_litecoin_core_transaction(&tx).await {
+                Ok(broadcast_txid) => broadcast_txid == txid,
+                Err(err) if is_op_drivechain_not_supported_rpc_error(&err) => false,
+                Err(err) => {
+                    tracing::warn!(
+                        %txid,
+                        err = ?err,
+                        err = %ErrorChain::new(&err),
+                        "Litecoin Core RPC deposit broadcast failed, trying P2P fallback"
+                    );
+                    false
+                }
+            };
 
         if !broadcast_successfully {
             if self.p2p_broadcast_addrs().count() > 0 {

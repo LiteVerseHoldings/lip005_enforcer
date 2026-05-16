@@ -65,10 +65,8 @@ fn deserialize_transaction_or_legacy_zero_input(
 mod tests {
     use super::*;
     use bitcoin::{
-        OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Witness,
-        consensus::Encodable as _,
-        opcodes::all::OP_RETURN,
-        script::Builder,
+        OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Witness, consensus::Encodable as _,
+        opcodes::all::OP_RETURN, script::Builder,
     };
 
     fn legacy_zero_input_tx_bytes(tx: &Transaction) -> Vec<u8> {

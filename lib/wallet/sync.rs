@@ -12,7 +12,7 @@ use tracing::instrument;
 
 use crate::{
     cli::WalletSyncSource,
-    types::WithdrawalBundleEventKind,
+    types::{BlockInfo, WithdrawalBundleEventKind},
     wallet::{
         BdkWallet, ChainSourceClient, Persistence, WalletInner, error,
         util::{RwLockUpgradableReadGuardSome, RwLockWriteGuardSome},
@@ -47,23 +47,10 @@ impl SyncWriteGuard<'_> {
 const ESPLORA_PARALLEL_REQUESTS: usize = 25;
 
 impl WalletInner {
-    pub(in crate::wallet) async fn get_tip(&self) -> Result<bdk_core::BlockId, error::NotUnlocked> {
-        let wallet = self.read_wallet().await?;
-
-        Ok(wallet.local_chain().tip().block_id())
-    }
-
-    #[instrument(skip_all, fields(block_height))]
-    pub(in crate::wallet) async fn handle_connect_block(
+    pub(in crate::wallet) async fn handle_block_metadata(
         &self,
-        block: &bitcoin::Block,
-        block_height: u32,
-        block_info: &crate::types::BlockInfo,
-    ) -> Result<Result<(), bdk_chain::local_chain::CannotConnectError>, error::HandleConnectBlock>
-    {
-        // Acquire a wallet lock immediately, so that it does not update
-        // while other dbs are being written to
-        let mut wallet_write = self.write_wallet().await?;
+        block_info: &BlockInfo,
+    ) -> Result<(), error::HandleConnectBlock> {
         let finalized_withdrawal_bundles =
             block_info
                 .withdrawal_bundle_events()
@@ -84,6 +71,27 @@ impl WalletInner {
         let () = self
             .delete_pending_sidechain_proposals(sidechain_proposal_ids)
             .await?;
+        Ok(())
+    }
+
+    pub(in crate::wallet) async fn get_tip(&self) -> Result<bdk_core::BlockId, error::NotUnlocked> {
+        let wallet = self.read_wallet().await?;
+
+        Ok(wallet.local_chain().tip().block_id())
+    }
+
+    #[instrument(skip_all, fields(block_height))]
+    pub(in crate::wallet) async fn handle_connect_block(
+        &self,
+        block: &bitcoin::Block,
+        block_height: u32,
+        block_info: &crate::types::BlockInfo,
+    ) -> Result<Result<(), bdk_chain::local_chain::CannotConnectError>, error::HandleConnectBlock>
+    {
+        // Acquire a wallet lock immediately, so that it does not update
+        // while other dbs are being written to
+        let mut wallet_write = self.write_wallet().await?;
+        let () = self.handle_block_metadata(block_info).await?;
         let mut database = self.bdk_db.lock().await;
         tracing::debug!("applying block to BDK wallet");
 
