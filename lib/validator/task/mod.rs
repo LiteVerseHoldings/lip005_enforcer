@@ -31,8 +31,8 @@ use crate::{
     types::{
         BlockEvent, BlockInfo, BmmCommitments, Ctip, Deposit, Event, HeaderInfo, M6id,
         PendingM6idInfo, Sidechain, SidechainNumber, SidechainProposal, SidechainProposalId,
-        SidechainProposalStatus, WITHDRAWAL_BUNDLE_INCLUSION_THRESHOLD, WITHDRAWAL_BUNDLE_MAX_AGE,
-        WithdrawalBundleEvent, WithdrawalBundleEventKind,
+        SidechainProposalStatus, WithdrawalBundleEvent, WithdrawalBundleEventKind,
+        withdrawal_bundle_inclusion_threshold, withdrawal_bundle_max_age,
     },
     validator::{
         dbs::{
@@ -316,7 +316,7 @@ fn handle_m4_ack_bundles(
 }
 
 /// BIP 300 M6 failure path: removes pending withdrawal bundles whose age
-/// has exceeded `WITHDRAWAL_BUNDLE_MAX_AGE`.
+/// has exceeded the network's withdrawal bundle max age.
 ///
 /// <https://github.com/LayerTwo-Labs/bip300_bip301_specifications/blob/master/bip300.md#m6-withdrawal-bundle>
 fn handle_failed_m6ids(
@@ -324,6 +324,7 @@ fn handle_failed_m6ids(
     dbs: &Dbs,
     block_height: u32,
 ) -> Result<diff::FailedM6ids, error::HandleFailedM6Ids> {
+    let max_age = u32::from(withdrawal_bundle_max_age(dbs.network));
     let active_sidechains: Vec<_> = dbs
         .active_sidechains
         .sidechain()
@@ -347,7 +348,7 @@ fn handle_failed_m6ids(
             .enumerate()
             .filter(|(_, (_, info))| {
                 let age = block_height.saturating_sub(info.proposal_height);
-                age > WITHDRAWAL_BUNDLE_MAX_AGE as u32
+                age > max_age
             })
             .collect::<BTreeMap<_, _>>();
         if !failed.is_empty() {
@@ -370,6 +371,7 @@ fn handle_m6(
     dbs: &ActiveSidechainDbs,
     transaction: Transaction,
     old_treasury_value: Amount,
+    network: Network,
 ) -> Result<(M6id, SidechainNumber, PendingM6idInfo), error::HandleM5M6> {
     let (m6id, sidechain_number) = compute_m6id(transaction, old_treasury_value)?;
 
@@ -380,7 +382,7 @@ fn handle_m6(
     let info = pending_m6ids
         .get(&m6id)
         .ok_or(error::HandleM5M6::InvalidM6)?;
-    if info.vote_count > WITHDRAWAL_BUNDLE_INCLUSION_THRESHOLD {
+    if info.vote_count > withdrawal_bundle_inclusion_threshold(network) {
         Ok((m6id, sidechain_number, *info))
     } else {
         Err(error::HandleM5M6::InvalidM6)
@@ -398,6 +400,7 @@ fn handle_m5_m6(
     rotxn: &RoTxn,
     dbs: &ActiveSidechainDbs,
     transaction: Cow<'_, Transaction>,
+    network: Network,
 ) -> Result<Option<(DepositOrSuccessfulWithdrawal, diff::Tx)>, error::HandleM5M6> {
     let txid = transaction.compute_txid();
     // TODO: Check that there is only one OP_DRIVECHAIN per sidechain slot.
@@ -440,8 +443,13 @@ fn handle_m5_m6(
             if transaction.input.len() != 1 {
                 return Ok(None);
             }
-            let (m6id, sidechain_number_, info) =
-                handle_m6(rotxn, dbs, transaction.into_owned(), old_treasury_value)?;
+            let (m6id, sidechain_number_, info) = handle_m6(
+                rotxn,
+                dbs,
+                transaction.into_owned(),
+                old_treasury_value,
+                network,
+            )?;
             // `handle_m6` → `compute_m6id` parses the same first-output script
             // that we already parsed above. Mismatch would mean the parser is
             // non-deterministic (impossible) or the transaction was mutated
@@ -629,9 +637,10 @@ fn handle_transaction(
     accepted_bmm_requests: Option<&BmmCommitments>,
     prev_mainchain_block_hash: &BlockHash,
     transaction: &Transaction,
+    network: Network,
 ) -> Result<Option<(TransactionEvent, diff::Tx)>, error::HandleTransaction> {
     let mut res = None;
-    match handle_m5_m6(rotxn, dbs, Cow::Borrowed(transaction))? {
+    match handle_m5_m6(rotxn, dbs, Cow::Borrowed(transaction), network)? {
         Some((Either::Left(deposit), diff)) => {
             res = Some((TransactionEvent::Deposit(deposit), diff));
         }
@@ -686,6 +695,7 @@ pub fn validate_tx(
         None,
         &tip_hash,
         transaction,
+        dbs.network,
     ) {
         Ok(None) => Ok(true),
         Ok(Some((_, diff))) => {
@@ -822,6 +832,7 @@ pub(in crate::validator) fn connect_block(
     tracing::trace!("Handled coinbase tx, handling other txs...");
     let block_hash = block.header.block_hash();
     let prev_mainchain_block_hash = block.header.prev_blockhash;
+    let network = dbs.network;
     let mut tx_diffs = diff::DiffBuilder::new(rwtxn, &dbs.active_sidechains, height);
     'connect_txs: for transaction in &block.txdata[1..] {
         let result = match tx_diffs.rotxn(|rotxn, dbs| {
@@ -831,6 +842,7 @@ pub(in crate::validator) fn connect_block(
                 Some(&accepted_bmm_requests),
                 &prev_mainchain_block_hash,
                 transaction,
+                network,
             )
         }) {
             Ok(result) => result,
@@ -1669,6 +1681,7 @@ mod tests {
             Some(&empty),
             &prev_hash,
             &tx,
+            Network::Regtest,
         )
         .expect_err("not-accepted M8 must error");
         assert!(!err.is_fatal());
@@ -1679,6 +1692,7 @@ mod tests {
             None,
             &dummy_block_hash(0xBB),
             &tx,
+            Network::Regtest,
         )
         .expect_err("expired M8 must error");
         assert!(!err.is_fatal());
@@ -1702,6 +1716,7 @@ mod tests {
             Some(&accepted),
             &prev_hash,
             &tx,
+            Network::Regtest,
         )
         .into_diagnostic()?;
         assert!(result.is_none(), "valid M8 should not produce a tx event");
@@ -1830,7 +1845,7 @@ mod tests {
         dbs.active_sidechains
             .with_pending_withdrawal_entry(&mut rwtxn, &sc, m6id, |entry| {
                 let info = entry.or_insert(PendingM6idInfo::new(0));
-                info.vote_count = WITHDRAWAL_BUNDLE_INCLUSION_THRESHOLD + 1;
+                info.vote_count = withdrawal_bundle_inclusion_threshold(Network::Regtest) + 1;
             })
             .into_diagnostic()?;
 
@@ -1839,7 +1854,10 @@ mod tests {
         dbs.block_hashes
             .put_headers(
                 &mut rwtxn,
-                &[(block.header, u32::from(WITHDRAWAL_BUNDLE_MAX_AGE) + 1)],
+                &[(
+                    block.header,
+                    u32::from(withdrawal_bundle_max_age(Network::Regtest)) + 1,
+                )],
             )
             .into_diagnostic()?;
 
@@ -1884,7 +1902,8 @@ mod tests {
             handle_m5_m6(
                 &rotxn,
                 &dbs.active_sidechains,
-                Cow::Borrowed(&build_plain_tx())
+                Cow::Borrowed(&build_plain_tx()),
+                Network::Regtest,
             )
             .into_diagnostic()?
             .is_none()
@@ -1900,8 +1919,13 @@ mod tests {
         let deposit_amount = Amount::from_sat(10_000);
         let tx = build_m5_deposit_tx(sc, OutPoint::default(), Amount::ZERO, deposit_amount);
 
-        let result =
-            handle_m5_m6(&rotxn, &dbs.active_sidechains, Cow::Borrowed(&tx)).into_diagnostic()?;
+        let result = handle_m5_m6(
+            &rotxn,
+            &dbs.active_sidechains,
+            Cow::Borrowed(&tx),
+            Network::Regtest,
+        )
+        .into_diagnostic()?;
         let Some((Either::Left(deposit), diff)) = result else {
             panic!("expected M5 deposit");
         };
@@ -1937,8 +1961,13 @@ mod tests {
         let deposit_amount = Amount::from_sat(3_000);
         let tx = build_m5_deposit_tx(sc, old_outpoint, old_value, deposit_amount);
 
-        let Some((Either::Left(deposit), diff)) =
-            handle_m5_m6(&rwtxn, &dbs.active_sidechains, Cow::Borrowed(&tx)).into_diagnostic()?
+        let Some((Either::Left(deposit), diff)) = handle_m5_m6(
+            &rwtxn,
+            &dbs.active_sidechains,
+            Cow::Borrowed(&tx),
+            Network::Regtest,
+        )
+        .into_diagnostic()?
         else {
             panic!("expected M5 deposit");
         };
@@ -1972,8 +2001,13 @@ mod tests {
             Amount::from_sat(5_000),
             Amount::from_sat(1_000),
         );
-        let err = handle_m5_m6(&rwtxn, &dbs.active_sidechains, Cow::Borrowed(&tx))
-            .expect_err("spending wrong outpoint must error");
+        let err = handle_m5_m6(
+            &rwtxn,
+            &dbs.active_sidechains,
+            Cow::Borrowed(&tx),
+            Network::Regtest,
+        )
+        .expect_err("spending wrong outpoint must error");
         assert!(matches!(err, error::HandleM5M6::OldCtipUnspent { .. }));
         assert!(err.is_fatal());
         Ok(())

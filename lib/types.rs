@@ -21,8 +21,22 @@ use thiserror::Error;
 
 use crate::proto::{StatusBuilder, ToStatus};
 
-pub const WITHDRAWAL_BUNDLE_MAX_AGE: u16 = 10;
-pub const WITHDRAWAL_BUNDLE_INCLUSION_THRESHOLD: u16 = WITHDRAWAL_BUNDLE_MAX_AGE / 2; // 5
+/// Production M6 pegout voting window: 51,840 Litecoin/Bitcoin blocks,
+/// approximately 90 days at Litecoin's 2.5 minute target block interval.
+pub const MAINNET_WITHDRAWAL_BUNDLE_MAX_AGE: u16 = 51_840;
+pub const TEST_WITHDRAWAL_BUNDLE_MAX_AGE: u16 = 10;
+
+pub const fn withdrawal_bundle_max_age(network: bitcoin::Network) -> u16 {
+    match network {
+        bitcoin::Network::Bitcoin => MAINNET_WITHDRAWAL_BUNDLE_MAX_AGE,
+        bitcoin::Network::Signet | bitcoin::Network::Regtest => TEST_WITHDRAWAL_BUNDLE_MAX_AGE,
+        bitcoin::Network::Testnet | bitcoin::Network::Testnet4 => TEST_WITHDRAWAL_BUNDLE_MAX_AGE,
+    }
+}
+
+pub const fn withdrawal_bundle_inclusion_threshold(network: bitcoin::Network) -> u16 {
+    withdrawal_bundle_max_age(network) / 2
+}
 
 #[derive(derive::Debug, Clone, Copy, Display, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[debug("{}", hex::encode(_0))]
@@ -814,7 +828,11 @@ impl PendingM6idInfo {
 mod tests {
     use miette::Diagnostic as _;
 
-    use crate::types::{SidechainDeclaration, SidechainNumber, SidechainProposal};
+    use crate::types::{
+        MAINNET_WITHDRAWAL_BUNDLE_MAX_AGE, SidechainDeclaration, SidechainNumber,
+        SidechainProposal, TEST_WITHDRAWAL_BUNDLE_MAX_AGE, withdrawal_bundle_inclusion_threshold,
+        withdrawal_bundle_max_age,
+    };
 
     fn proposal(description: Vec<u8>) -> SidechainProposal {
         SidechainProposal {
@@ -825,6 +843,30 @@ mod tests {
 
     const EMPTY_HASH_ID_1: [u8; 32] = [1u8; 32];
     const EMPTY_HASH_ID_2: [u8; 20] = [2u8; 20];
+
+    #[test]
+    fn withdrawal_bundle_policy_is_network_gated() {
+        assert_eq!(
+            withdrawal_bundle_max_age(bitcoin::Network::Bitcoin),
+            MAINNET_WITHDRAWAL_BUNDLE_MAX_AGE
+        );
+        assert_eq!(
+            withdrawal_bundle_inclusion_threshold(bitcoin::Network::Bitcoin),
+            MAINNET_WITHDRAWAL_BUNDLE_MAX_AGE / 2
+        );
+        assert_eq!(
+            withdrawal_bundle_max_age(bitcoin::Network::Signet),
+            TEST_WITHDRAWAL_BUNDLE_MAX_AGE
+        );
+        assert_eq!(
+            withdrawal_bundle_max_age(bitcoin::Network::Regtest),
+            TEST_WITHDRAWAL_BUNDLE_MAX_AGE
+        );
+        assert_eq!(
+            withdrawal_bundle_max_age(bitcoin::Network::Testnet),
+            TEST_WITHDRAWAL_BUNDLE_MAX_AGE
+        );
+    }
 
     #[test]
     fn test_try_parse_valid_data() {

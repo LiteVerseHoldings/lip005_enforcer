@@ -302,6 +302,7 @@ pub type ProposalIdToSidechain =
 #[derive(Clone)]
 pub(super) struct Dbs {
     env: Env,
+    pub network: bitcoin::Network,
     pub active_sidechains: ActiveSidechainDbs,
     pub block_hashes: BlockHashDbs,
     /// Tip that the enforcer is synced to
@@ -345,6 +346,7 @@ impl Dbs {
         tracing::info!("Created validator DBs in {}", db_dir.display());
         Ok(Self {
             env,
+            network,
             active_sidechains,
             block_hashes,
             current_chain_tip,

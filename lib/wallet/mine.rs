@@ -32,7 +32,7 @@ use crate::{
     bins::{self, CommandExt as _},
     errors::ErrorChain,
     messages::{CoinbaseBuilder, M4AckBundles},
-    types::{Ctip, SidechainAck, SidechainNumber, WITHDRAWAL_BUNDLE_INCLUSION_THRESHOLD},
+    types::{Ctip, SidechainAck, SidechainNumber, withdrawal_bundle_inclusion_threshold},
     wallet::{
         Wallet,
         error::{self, BitcoinCoreRPC},
@@ -235,11 +235,13 @@ impl Wallet {
         ctips: &HashMap<SidechainNumber, crate::types::Ctip>,
     ) -> Result<Vec<Transaction>, error::GenerateSuffixTxs> {
         let mut res = Vec::new();
+        let inclusion_threshold =
+            withdrawal_bundle_inclusion_threshold(self.inner.validator.network());
         for (sidechain_id, m6ids) in self.get_bundle_proposals().await? {
             let mut ctip = None;
             for (_m6id, blinded_m6, m6id_info) in m6ids {
                 let Some(m6id_info) = m6id_info else { continue };
-                if m6id_info.vote_count > WITHDRAWAL_BUNDLE_INCLUSION_THRESHOLD {
+                if m6id_info.vote_count > inclusion_threshold {
                     let Ctip { outpoint, value } = if let Some(ctip) = ctip {
                         ctip
                     } else {

@@ -89,6 +89,13 @@ against a funded wallet-enabled Litecoin Core signet node. Full Drivechain
 lifecycle readiness still requires EVM bridge integration and longer-running
 operational hardening.
 
+The M6 withdrawal bundle voting window is block based, not wall-clock based.
+Bitcoin/mainnet uses a hardcoded 51,840 block window, approximately 90 days at
+Litecoin's 2.5 minute target interval. Signet, regtest, and testnet keep the
+short 10 block window so local controlled-signet tests can mine the proposal,
+votes, and inclusion path quickly. This is intentionally not a production
+configuration knob.
+
 # Interacting with the enforcer
 
 The CUSF enforcer exposes multiple gRPC services. These can be interacted with

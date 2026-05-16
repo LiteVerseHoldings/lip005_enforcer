@@ -13,12 +13,10 @@ use tracing::instrument;
 
 use crate::{
     messages::{CoinbaseBuilder, parse_m8_tx},
-    types::WITHDRAWAL_BUNDLE_MAX_AGE,
+    types::withdrawal_bundle_max_age,
     validator::Validator,
     wallet::{Wallet, error},
 };
-
-const LITECOIN_CORE_METADATA_SYNC_ANCESTORS: usize = (WITHDRAWAL_BUNDLE_MAX_AGE as usize) + 2;
 
 /// Sync wallet to tip.
 /// The inner validator is expected to already be synced to the same tip.
@@ -184,10 +182,12 @@ impl CusfEnforcer for Wallet {
         tracing::debug!(%tip_hash, "Synced validator");
 
         if self.inner.is_litecoin_core_wallet() {
+            let metadata_sync_ancestors =
+                usize::from(withdrawal_bundle_max_age(self.inner.validator.network())) + 2;
             let block_infos = self
                 .inner
                 .validator
-                .get_block_infos(&tip_hash, LITECOIN_CORE_METADATA_SYNC_ANCESTORS)?;
+                .get_block_infos(&tip_hash, metadata_sync_ancestors)?;
             for (_header_info, block_info) in &block_infos {
                 self.inner.handle_block_metadata(block_info).await?;
             }
